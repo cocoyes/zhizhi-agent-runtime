@@ -1,9 +1,0 @@
-./codec.go
-./decode.go
-./encode.go
-./int.go
-./json.go
-./parse.go
-./reflect.go
-./string.go
-./token.go

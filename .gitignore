@@ -22,3 +22,4 @@ tmp/*
 public/resource/pub_upload/
 data/dataBak
 app.log
+.gocache

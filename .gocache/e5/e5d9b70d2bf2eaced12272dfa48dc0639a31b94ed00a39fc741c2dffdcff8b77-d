@@ -1,4 +1,0 @@
-./auth.go
-./authorization_code.go
-./client.go
-./shared.go

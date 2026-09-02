@@ -1,5 +1,0 @@
-./compiler.go
-./scheduler.go
-./compiler_test.go
-./deadline_test.go
-./scheduler_test.go

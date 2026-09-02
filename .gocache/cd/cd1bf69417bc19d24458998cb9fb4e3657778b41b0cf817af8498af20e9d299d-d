@@ -1,6 +1,0 @@
-# test log
-getenv HTTP_PROXY
-getenv HTTPS_PROXY
-getenv NO_PROXY
-getenv no_proxy
-getenv REQUEST_METHOD

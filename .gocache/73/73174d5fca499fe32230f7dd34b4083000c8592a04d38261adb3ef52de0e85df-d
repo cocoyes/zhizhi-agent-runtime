@@ -1,6 +1,0 @@
-./agent.go
-./config.go
-./version.go
-./agent_complex_test.go
-./agent_test.go
-./config_test.go

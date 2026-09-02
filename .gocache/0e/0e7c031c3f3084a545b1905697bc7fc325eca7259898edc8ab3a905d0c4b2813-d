@@ -1,6 +1,0 @@
-# test log
-open C:\Users\admin\AppData\Local\Temp\TestLoadConfigExpandsEnvironment1438392682\001\agent.yaml
-getenv TEST_BASE_URL
-open C:\Users\admin\AppData\Local\Temp\TestLoadConfigExpandsEnvironment1438392682\001\agent.yaml
-getenv TEST_BASE_URL
-open C:\Users\admin\AppData\Local\Temp

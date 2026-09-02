@@ -1,4 +1,0 @@
-./optimizer.go
-./plan.go
-./optimizer_test.go
-./plan_test.go
