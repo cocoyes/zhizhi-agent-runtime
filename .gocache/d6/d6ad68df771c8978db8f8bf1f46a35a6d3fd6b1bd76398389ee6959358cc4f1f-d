@@ -1,0 +1,10 @@
+./ascii.go
+./equal_fold.go
+./equal_fold_amd64.go
+./valid.go
+./valid_amd64.go
+./valid_print.go
+./valid_print_amd64.go
+./equal_fold_amd64.s
+./valid_amd64.s
+./valid_print_amd64.s

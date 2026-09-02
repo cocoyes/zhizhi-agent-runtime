@@ -1,0 +1,3 @@
+./tool.go
+./spec_test.go
+./tool_test.go

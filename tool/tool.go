@@ -1,0 +1,277 @@
+package tool
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/invopop/jsonschema"
+	jsonschema6 "github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/zhizhi-ai/zhizhi-agent-runtime/contract"
+	"github.com/zhizhi-ai/zhizhi-agent-runtime/model"
+)
+
+type SideEffectClass string
+
+const (
+	SideEffectNone               SideEffectClass = "none"
+	SideEffectRead               SideEffectClass = "read"
+	SideEffectWriteIdempotent    SideEffectClass = "write_idempotent"
+	SideEffectWriteNonIdempotent SideEffectClass = "write_non_idempotent"
+	SideEffectDestructive        SideEffectClass = "destructive"
+	SideEffectUnknown            SideEffectClass = "unknown"
+	SideEffectWrite              SideEffectClass = SideEffectWriteNonIdempotent // compatibility alias
+)
+
+type Idempotency string
+
+const (
+	IdempotencySafe          Idempotency = "safe"
+	IdempotencyIdempotent    Idempotency = "idempotent"
+	IdempotencyNonIdempotent Idempotency = "non_idempotent"
+	IdempotencyUnknown       Idempotency = "unknown"
+)
+
+type RiskLevel string
+
+const (
+	RiskLow      RiskLevel = "low"
+	RiskMedium   RiskLevel = "medium"
+	RiskHigh     RiskLevel = "high"
+	RiskCritical RiskLevel = "critical"
+)
+
+type ConfirmationPolicy string
+
+const (
+	ConfirmationNever  ConfirmationPolicy = "never"
+	ConfirmationOnRisk ConfirmationPolicy = "on_risk"
+	ConfirmationAlways ConfirmationPolicy = "always"
+)
+
+type Spec struct {
+	ID             string
+	Description    string
+	InputSchema    json.RawMessage
+	OutputSchema   json.RawMessage
+	Capabilities   []string
+	SideEffect     SideEffectClass
+	Idempotency    Idempotency
+	Timeout        time.Duration
+	Version        string
+	ProviderID     string
+	Retryable      bool
+	ConcurrencyKey string
+	RiskLevel      RiskLevel
+	Confirmation   ConfirmationPolicy
+	DataClasses    []string
+	TrustLevel     string
+}
+
+type Result struct {
+	Content any
+	Receipt bool
+	Action  *ActionReceipt
+}
+
+type ActionReceipt = contract.ActionReceipt
+
+type Tool interface {
+	Spec() Spec
+	ModelSpec() model.ToolSpec
+	Call(context.Context, json.RawMessage) (Result, error)
+}
+
+type FuncOption func(*Spec)
+
+func WithCapabilities(values ...string) FuncOption {
+	return func(s *Spec) { s.Capabilities = append(s.Capabilities, values...) }
+}
+func WithSideEffect(v SideEffectClass) FuncOption      { return func(s *Spec) { s.SideEffect = v } }
+func WithIdempotency(v Idempotency) FuncOption         { return func(s *Spec) { s.Idempotency = v } }
+func WithTimeout(v time.Duration) FuncOption           { return func(s *Spec) { s.Timeout = v } }
+func WithVersion(v string) FuncOption                  { return func(s *Spec) { s.Version = v } }
+func WithProviderID(v string) FuncOption               { return func(s *Spec) { s.ProviderID = v } }
+func WithRetryable(v bool) FuncOption                  { return func(s *Spec) { s.Retryable = v } }
+func WithConcurrencyKey(v string) FuncOption           { return func(s *Spec) { s.ConcurrencyKey = v } }
+func WithRisk(v RiskLevel) FuncOption                  { return func(s *Spec) { s.RiskLevel = v } }
+func WithConfirmation(v ConfirmationPolicy) FuncOption { return func(s *Spec) { s.Confirmation = v } }
+func WithDataClasses(v ...string) FuncOption {
+	return func(s *Spec) { s.DataClasses = append(s.DataClasses, v...) }
+}
+
+type funcTool[I any, O any] struct {
+	spec         Spec
+	fn           func(context.Context, I) (O, error)
+	outputSchema json.RawMessage
+}
+
+func Func[I any, O any](name, description string, fn func(context.Context, I) (O, error), options ...FuncOption) Tool {
+	r := new(jsonschema.Reflector)
+	in := r.Reflect(new(I))
+	input, _ := json.Marshal(in)
+	out := r.Reflect(new(O))
+	output, _ := json.Marshal(out)
+	s := Spec{ID: name, Description: description, InputSchema: input, SideEffect: SideEffectRead, Idempotency: IdempotencySafe, Retryable: true, RiskLevel: RiskLow, Confirmation: ConfirmationNever, TrustLevel: "trusted"}
+	for _, option := range options {
+		option(&s)
+	}
+	s.OutputSchema = output
+	return &funcTool[I, O]{spec: s, fn: fn, outputSchema: output}
+}
+
+func (s Spec) IsWrite() bool {
+	return s.SideEffect == SideEffectWrite || s.SideEffect == SideEffectWriteIdempotent || s.SideEffect == SideEffectWriteNonIdempotent || s.SideEffect == SideEffectDestructive
+}
+func (s Spec) RequiresConfirmation() bool {
+	return s.Confirmation == ConfirmationAlways || (s.Confirmation == ConfirmationOnRisk && (s.RiskLevel == RiskHigh || s.RiskLevel == RiskCritical || s.IsWrite()))
+}
+func (s Spec) Validate() error {
+	if s.ID == "" {
+		return fmt.Errorf("tool: id is required")
+	}
+	if s.Description == "" {
+		return fmt.Errorf("tool %s: description is required", s.ID)
+	}
+	if s.IsWrite() && s.Idempotency == IdempotencyUnknown {
+		return fmt.Errorf("tool %s: write idempotency must be declared", s.ID)
+	}
+	return nil
+}
+
+func (t *funcTool[I, O]) Spec() Spec { return t.spec }
+func (t *funcTool[I, O]) ModelSpec() model.ToolSpec {
+	return model.ToolSpec{Type: "function", Function: model.FunctionSpec{Name: t.spec.ID, Description: t.spec.Description, Parameters: t.spec.InputSchema}, Capabilities: append([]string(nil), t.spec.Capabilities...)}
+}
+func (t *funcTool[I, O]) Call(ctx context.Context, raw json.RawMessage) (Result, error) {
+	if err := ValidateInput(t.spec, raw); err != nil {
+		return Result{}, err
+	}
+	var args I
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return Result{}, fmt.Errorf("tool %s: invalid arguments: %w", t.spec.ID, err)
+	}
+	if t.spec.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, t.spec.Timeout)
+		defer cancel()
+	}
+	v, err := t.fn(ctx, args)
+	if err != nil {
+		return Result{}, err
+	}
+	encodedOutput, _ := json.Marshal(v)
+	var genericOutput any
+	_ = json.Unmarshal(encodedOutput, &genericOutput)
+	if err := ValidateValue(t.spec.ID, t.outputSchema, genericOutput); err != nil {
+		return Result{}, err
+	}
+	isWrite := t.spec.IsWrite()
+	result := Result{Content: v, Receipt: isWrite}
+	if isWrite {
+		now := time.Now().UTC()
+		result.Action = &ActionReceipt{ToolID: t.spec.ID, Status: contract.ActionSuccess, ExecutedAt: now, Timestamp: now}
+	}
+	return result, nil
+}
+
+func ValidateInput(spec Spec, raw json.RawMessage) error {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return fmt.Errorf("tool %s: invalid arguments: %w", spec.ID, err)
+	}
+	return ValidateValue(spec.ID, spec.InputSchema, value)
+}
+func ValidateValue(id string, schemaJSON json.RawMessage, value any) error {
+	if len(schemaJSON) == 0 || string(schemaJSON) == "null" {
+		return nil
+	}
+	var schema any
+	if err := json.Unmarshal(schemaJSON, &schema); err != nil {
+		return fmt.Errorf("tool %s: invalid schema: %w", id, err)
+	}
+	compiler := jsonschema6.NewCompiler()
+	if err := compiler.AddResource("mem://tool-schema.json", schema); err != nil {
+		return fmt.Errorf("tool %s: register schema: %w", id, err)
+	}
+	compiled, err := compiler.Compile("mem://tool-schema.json")
+	if err != nil {
+		return fmt.Errorf("tool %s: compile schema: %w", id, err)
+	}
+	if err := compiled.Validate(value); err != nil {
+		return fmt.Errorf("tool %s: value violates schema: %w", id, err)
+	}
+	return nil
+}
+
+type Registry struct{ tools map[string]Tool }
+
+func NewRegistry(values ...Tool) *Registry {
+	r := &Registry{tools: make(map[string]Tool)}
+	for _, v := range values {
+		r.Add(v)
+	}
+	return r
+}
+func (r *Registry) Add(v Tool) {
+	if v != nil {
+		r.tools[v.Spec().ID] = v
+	}
+}
+func (r *Registry) Validate() error {
+	for id, value := range r.tools {
+		if err := value.Spec().Validate(); err != nil {
+			return fmt.Errorf("tool %s: %w", id, err)
+		}
+	}
+	return nil
+}
+func (r *Registry) Get(id string) (Tool, bool) { v, ok := r.tools[id]; return v, ok }
+func (r *Registry) ResolveCapability(capability string) []Tool {
+	ids := make([]string, 0)
+	for id, value := range r.tools {
+		wireID := normalizeToolName(id)
+		for _, candidate := range value.Spec().Capabilities {
+			if candidate == capability || wireID == capability {
+				ids = append(ids, id)
+				break
+			}
+		}
+	}
+	sort.Strings(ids)
+	out := make([]Tool, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, r.tools[id])
+	}
+	return out
+}
+
+// normalizeToolName mirrors the function-name restrictions used by the
+// OpenAI-compatible wire protocol. It lets a planner refer to a tool by its
+// sanitized function name while the registry keeps the original ID.
+func normalizeToolName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+func (r *Registry) ModelSpecs() []model.ToolSpec {
+	ids := make([]string, 0, len(r.tools))
+	for id := range r.tools {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]model.ToolSpec, 0, len(r.tools))
+	for _, id := range ids {
+		out = append(out, r.tools[id].ModelSpec())
+	}
+	return out
+}
