@@ -125,6 +125,29 @@ func TestGenerateSendsThinkingDisabled(t *testing.T) {
 	}
 }
 
+func TestGenerateUsesDefaultThinkingOptions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Thinking struct {
+				Type string `json:"type"`
+			} `json:"thinking"`
+			ReasoningEffort string `json:"reasoning_effort"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.Thinking.Type != ThinkingDisabled || request.ReasoningEffort != "high" {
+			t.Fatalf("default thinking options missing from wire request: %+v", request)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"done"}}]}`)
+	}))
+	defer srv.Close()
+	if _, err := New(Config{BaseURL: srv.URL, Model: "test"}).Generate(context.Background(), ModelInputForTest("choose")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateSendsForcedToolChoice(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {

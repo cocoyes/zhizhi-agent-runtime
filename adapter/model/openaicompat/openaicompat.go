@@ -24,9 +24,10 @@ type Config struct {
 	Compatibility          string
 	// Thinking controls provider-specific hybrid reasoning switches used by
 	// DeepSeek and Doubao ("enabled", "disabled", or "auto"). An empty value
-	// leaves the provider default untouched.
+	// defaults to ThinkingDisabled.
 	Thinking string
-	// ReasoningEffort is sent as the top-level reasoning_effort field.
+	// ReasoningEffort is sent as the top-level reasoning_effort field. An empty
+	// value defaults to "high".
 	ReasoningEffort string
 	Capabilities    *model.ModelCapabilities
 	MaxBodySize     int64
@@ -46,6 +47,12 @@ type Client struct {
 func New(cfg Config) *Client {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 60 * time.Second
+	}
+	if cfg.Thinking == "" {
+		cfg.Thinking = ThinkingDisabled
+	}
+	if cfg.ReasoningEffort == "" {
+		cfg.ReasoningEffort = "high"
 	}
 	c := cfg.Client
 	if c == nil {

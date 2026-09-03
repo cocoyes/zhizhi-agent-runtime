@@ -50,7 +50,7 @@ model := openaicompat.New(openaicompat.Config{
 })
 ```
 
-适配器会发送 `thinking: {"type":"..."}` 和顶层 `reasoning_effort`。思考模式结合工具调用时，返回的 `reasoning_content` 会在同一轮后续请求中自动回传。具体枚举范围仍取决于 provider 和模型版本；不配置时保持服务端默认行为。示例 10 也支持环境变量 `LLM_THINKING` 和 `LLM_REASONING_EFFORT`。
+适配器会发送 `thinking: {"type":"..."}` 和顶层 `reasoning_effort`。思考模式结合工具调用时，返回的 `reasoning_content` 会在同一轮后续请求中自动回传。不传这两个字段时，适配器默认使用 `ThinkingDisabled` 和 `high` 推理强度。具体枚举范围仍取决于 provider 和模型版本。示例 10 也支持环境变量 `LLM_THINKING` 和 `LLM_REASONING_EFFORT`。
 
 排查规划或工具参数问题时，可启用详细 JSONL：
 

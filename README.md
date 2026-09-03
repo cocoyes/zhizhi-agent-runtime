@@ -53,7 +53,7 @@ model := openaicompat.New(openaicompat.Config{
 })
 ```
 
-The adapter sends `thinking: {"type":"..."}` and the top-level `reasoning_effort` field. When thinking mode is combined with tool calls, returned `reasoning_content` is automatically preserved in same-turn continuation requests. Supported values still depend on the provider and model version; leaving these fields empty preserves provider defaults. Example 10 also reads `LLM_THINKING` and `LLM_REASONING_EFFORT`.
+The adapter sends `thinking: {"type":"..."}` and the top-level `reasoning_effort` field. When thinking mode is combined with tool calls, returned `reasoning_content` is automatically preserved in same-turn continuation requests. If these fields are omitted, the adapter defaults to `ThinkingDisabled` and reasoning effort `high`. Supported values still depend on the provider and model version. Example 10 also reads `LLM_THINKING` and `LLM_REASONING_EFFORT`.
 
 Enable detailed JSONL when diagnosing plans or tool arguments:
 
