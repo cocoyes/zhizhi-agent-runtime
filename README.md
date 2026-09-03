@@ -41,6 +41,32 @@ Chat Completions responses and Responses-style text responses (`output_text` or
 `output[].content[].text`). Internal tool IDs may contain dots; they are normalized
 only on the provider wire format.
 
+Hybrid reasoning models such as DeepSeek and Doubao can be configured explicitly:
+
+```go
+model := openaicompat.New(openaicompat.Config{
+    BaseURL:         os.Getenv("LLM_BASE_URL"),
+    APIKey:          os.Getenv("LLM_API_KEY"),
+    Model:           os.Getenv("LLM_MODEL"),
+    Thinking:        openaicompat.ThinkingEnabled, // or ThinkingDisabled / ThinkingAuto
+    ReasoningEffort: "high",
+})
+```
+
+The adapter sends `thinking: {"type":"..."}` and the top-level `reasoning_effort` field. When thinking mode is combined with tool calls, returned `reasoning_content` is automatically preserved in same-turn continuation requests. Supported values still depend on the provider and model version; leaving these fields empty preserves provider defaults. Example 10 also reads `LLM_THINKING` and `LLM_REASONING_EFFORT`.
+
+Enable detailed JSONL when diagnosing plans or tool arguments:
+
+```go
+zhizhi.WithObserver(observe.NewJSONL(os.Stdout, observe.WithDetails()))
+```
+
+Detailed mode records planner/replanner model requests, raw responses and repair attempts, actual per-step inputs/outputs/errors, the final patch, and final-composer requests/responses. It may contain user or business data, so it is disabled by default; example 10 enables it explicitly.
+
+The runtime no longer hand-parses structured model output: `jsonrepair-go` extracts and repairs non-standard JSON, `mapstructure/v2` handles common weak scalar drift, and `go-openapi/jsonpointer` resolves RFC 6901 evidence paths. Repaired syntax must still pass plan, JSON Schema, and patch-application validation before execution.
+
+The planner and replanner follow Eino's structured-output pattern on their primary path: derive JSON Schema from the Go result type, bind Plan or Patch as the only synthetic output tool, force `tool_choice`, and consume only that tool's arguments. Plain JSON text remains a compatibility path for models that do not advertise tool calling; domain tools are catalog metadata and cannot execute during planning.
+
 ## Install
 
 ```bash

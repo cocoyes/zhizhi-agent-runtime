@@ -22,9 +22,22 @@ type Config struct {
 	ExtraHeaders           map[string]string
 	Client                 *http.Client
 	Compatibility          string
-	Capabilities           *model.ModelCapabilities
-	MaxBodySize            int64
+	// Thinking controls provider-specific hybrid reasoning switches used by
+	// DeepSeek and Doubao ("enabled", "disabled", or "auto"). An empty value
+	// leaves the provider default untouched.
+	Thinking string
+	// ReasoningEffort is sent as the top-level reasoning_effort field.
+	ReasoningEffort string
+	Capabilities    *model.ModelCapabilities
+	MaxBodySize     int64
 }
+
+const (
+	ThinkingEnabled  = "enabled"
+	ThinkingDisabled = "disabled"
+	ThinkingAuto     = "auto"
+)
+
 type Client struct {
 	cfg        Config
 	httpClient *http.Client
@@ -81,11 +94,17 @@ func statusError(status int, message string) *Error {
 }
 
 type chatRequest struct {
-	Model          string           `json:"model"`
-	Messages       []model.Message  `json:"messages"`
-	Tools          []model.ToolSpec `json:"tools,omitempty"`
-	Stream         bool             `json:"stream,omitempty"`
-	ResponseFormat *responseFormat  `json:"response_format,omitempty"`
+	Model           string           `json:"model"`
+	Messages        []model.Message  `json:"messages"`
+	Tools           []model.ToolSpec `json:"tools,omitempty"`
+	Stream          bool             `json:"stream,omitempty"`
+	ResponseFormat  *responseFormat  `json:"response_format,omitempty"`
+	Thinking        *thinkingConfig  `json:"thinking,omitempty"`
+	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
+	ToolChoice      model.ToolChoice `json:"tool_choice,omitempty"`
+}
+type thinkingConfig struct {
+	Type string `json:"type"`
 }
 type responseFormat struct {
 	Type string `json:"type"`
@@ -109,7 +128,15 @@ func (c *Client) endpoint() string {
 	return strings.TrimRight(c.cfg.BaseURL, "/") + "/chat/completions"
 }
 func (c *Client) request(ctx context.Context, input model.ModelInput, stream bool) (*http.Response, error) {
-	request := chatRequest{Model: c.cfg.Model, Messages: input.Messages, Tools: input.Tools, Stream: stream}
+	request := chatRequest{Model: c.cfg.Model, Messages: input.Messages, Tools: input.Tools, Stream: stream, ReasoningEffort: c.cfg.ReasoningEffort, ToolChoice: input.ToolChoice}
+	if c.cfg.Thinking != "" {
+		switch c.cfg.Thinking {
+		case ThinkingEnabled, ThinkingDisabled, ThinkingAuto:
+			request.Thinking = &thinkingConfig{Type: c.cfg.Thinking}
+		default:
+			return nil, fmt.Errorf("model: invalid thinking mode %q", c.cfg.Thinking)
+		}
+	}
 	if input.JSONMode && !stream {
 		request.ResponseFormat = &responseFormat{Type: "json_object"}
 	}
@@ -145,7 +172,10 @@ func (c *Client) request(ctx context.Context, input model.ModelInput, stream boo
 	return resp, nil
 }
 func (c *Client) Generate(ctx context.Context, input model.ModelInput) (*model.ModelOutput, error) {
-	wireInput, toolNames := wireModelInput(input)
+	wireInput, toolNames, err := wireModelInput(input)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := c.request(ctx, wireInput, false)
 	if err != nil {
 		return nil, err
@@ -187,7 +217,7 @@ func (c *Client) Generate(ctx context.Context, input model.ModelInput) (*model.M
 			ch.Message.ToolCalls[i].Function.Name = original
 		}
 	}
-	return &model.ModelOutput{Text: ch.Message.Content, ToolCalls: ch.Message.ToolCalls, FinishReason: model.FinishReason(ch.FinishReason), Usage: decoded.Usage}, nil
+	return &model.ModelOutput{Text: ch.Message.Content, ReasoningContent: ch.Message.ReasoningContent, ToolCalls: ch.Message.ToolCalls, FinishReason: model.FinishReason(ch.FinishReason), Usage: decoded.Usage}, nil
 }
 
 func compactBody(body []byte) string {
@@ -199,7 +229,10 @@ func compactBody(body []byte) string {
 	return text
 }
 func (c *Client) Stream(ctx context.Context, input model.ModelInput) (model.Stream, error) {
-	wireInput, toolNames := wireModelInput(input)
+	wireInput, toolNames, err := wireModelInput(input)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := c.request(ctx, wireInput, true)
 	if err != nil {
 		return nil, err
@@ -221,8 +254,9 @@ type stream struct {
 type streamChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content   string `json:"content"`
-			ToolCalls []struct {
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+			ToolCalls        []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
 				Function struct {
@@ -260,6 +294,7 @@ func (s *stream) Recv(ctx context.Context) (model.StreamEvent, error) {
 			if len(ch.Choices) > 0 {
 				choice := ch.Choices[0]
 				ev.TextDelta = choice.Delta.Content
+				ev.ReasoningDelta = choice.Delta.ReasoningContent
 				ev.FinishReason = model.FinishReason(choice.FinishReason)
 				for _, tc := range choice.Delta.ToolCalls {
 					d := s.calls[tc.Index]
@@ -285,7 +320,7 @@ func (s *stream) Recv(ctx context.Context) (model.StreamEvent, error) {
 }
 func (s *stream) Close() error { s.done = true; return s.resp.Body.Close() }
 
-func wireModelInput(input model.ModelInput) (model.ModelInput, map[string]string) {
+func wireModelInput(input model.ModelInput) (model.ModelInput, map[string]string, error) {
 	out := input
 	out.Messages = append([]model.Message(nil), input.Messages...)
 	out.Tools = append([]model.ToolSpec(nil), input.Tools...)
@@ -293,6 +328,11 @@ func wireModelInput(input model.ModelInput) (model.ModelInput, map[string]string
 	originalNames := make(map[string]string, len(input.Tools))
 	used := make(map[string]struct{}, len(input.Tools))
 	for i := range out.Tools {
+		parameters, err := normalizeFunctionParameters(out.Tools[i].Function.Name, out.Tools[i].Function.Parameters)
+		if err != nil {
+			return model.ModelInput{}, nil, err
+		}
+		out.Tools[i].Function.Parameters = parameters
 		original := out.Tools[i].Function.Name
 		wire := wireToolName(original)
 		if _, exists := used[wire]; exists {
@@ -320,7 +360,61 @@ func wireModelInput(input model.ModelInput) (model.ModelInput, map[string]string
 			}
 		}
 	}
-	return out, toolNames
+	return out, toolNames, nil
+}
+
+func normalizeFunctionParameters(name string, raw json.RawMessage) (json.RawMessage, error) {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return json.RawMessage(`{"type":"object","properties":{}}`), nil
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return nil, fmt.Errorf("model tool %s: parameters must be a JSON object: %w", name, err)
+	}
+	if refRaw, ok := root["$ref"]; ok {
+		var ref string
+		if err := json.Unmarshal(refRaw, &ref); err != nil || !strings.HasPrefix(ref, "#/$defs/") {
+			return nil, fmt.Errorf("model tool %s: unsupported root schema reference %q", name, ref)
+		}
+		var defs map[string]json.RawMessage
+		if err := json.Unmarshal(root["$defs"], &defs); err != nil {
+			return nil, fmt.Errorf("model tool %s: root schema reference has no usable $defs", name)
+		}
+		definition, ok := defs[strings.TrimPrefix(ref, "#/$defs/")]
+		if !ok {
+			return nil, fmt.Errorf("model tool %s: unresolved root schema reference %q", name, ref)
+		}
+		var expanded map[string]json.RawMessage
+		if err := json.Unmarshal(definition, &expanded); err != nil {
+			return nil, fmt.Errorf("model tool %s: referenced root schema is not an object", name)
+		}
+		for key, value := range root {
+			if key != "$ref" {
+				expanded[key] = value
+			}
+		}
+		root = expanded
+	}
+	var schemaType string
+	if typeRaw, ok := root["type"]; ok {
+		if err := json.Unmarshal(typeRaw, &schemaType); err != nil {
+			return nil, fmt.Errorf("model tool %s: parameters type must be \"object\"", name)
+		}
+	} else if _, hasProperties := root["properties"]; hasProperties || len(root) == 0 {
+		schemaType = "object"
+		root["type"] = json.RawMessage(`"object"`)
+	}
+	if schemaType != "object" {
+		return nil, fmt.Errorf("model tool %s: parameters root type must be \"object\", got %q", name, schemaType)
+	}
+	if _, ok := root["properties"]; !ok {
+		root["properties"] = json.RawMessage(`{}`)
+	}
+	normalized, err := json.Marshal(root)
+	if err != nil {
+		return nil, fmt.Errorf("model tool %s: encode normalized parameters: %w", name, err)
+	}
+	return normalized, nil
 }
 
 func wireToolName(name string) string {

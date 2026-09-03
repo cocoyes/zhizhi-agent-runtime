@@ -28,8 +28,8 @@ func TestFuncGeneratesSchemaAndCallsFunction(t *testing.T) {
 	if err := json.Unmarshal(v.Spec().InputSchema, &schema); err != nil {
 		t.Fatal(err)
 	}
-	if schema["$ref"] == nil || schema["$defs"] == nil {
-		t.Fatalf("expected reflected schema: %v", schema)
+	if schema["type"] != "object" || schema["properties"] == nil {
+		t.Fatalf("expected an inline object schema: %v", schema)
 	}
 	result, err := v.Call(context.Background(), json.RawMessage(`{"city":"Shenzhen"}`))
 	if err != nil || !called || result.Content.(testResult).City != "Shenzhen" {

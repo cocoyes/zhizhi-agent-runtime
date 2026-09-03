@@ -66,6 +66,99 @@ func TestGenerateSanitizesAndRestoresToolNames(t *testing.T) {
 	}
 }
 
+func TestGenerateNormalizesRootRefAndSendsThinkingOptions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Thinking struct {
+				Type string `json:"type"`
+			} `json:"thinking"`
+			ReasoningEffort string           `json:"reasoning_effort"`
+			Tools           []model.ToolSpec `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.Thinking.Type != ThinkingEnabled || request.ReasoningEffort != "high" {
+			t.Fatalf("thinking options missing from wire request: %+v", request)
+		}
+		var schema map[string]any
+		if err := json.Unmarshal(request.Tools[0].Function.Parameters, &schema); err != nil {
+			t.Fatal(err)
+		}
+		if schema["type"] != "object" || schema["properties"] == nil {
+			t.Fatalf("root schema was not expanded into an object: %v", schema)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"done","reasoning_content":"private reasoning"}}]}`)
+	}))
+	defer srv.Close()
+	input := ModelInputForTest("choose")
+	input.Tools = []model.ToolSpec{{Type: "function", Function: model.FunctionSpec{
+		Name:       "activity.cached",
+		Parameters: json.RawMessage(`{"$ref":"#/$defs/Input","$defs":{"Input":{"type":"object","properties":{"temperature":{"type":"integer"}}}}}`),
+	}}}
+	out, err := New(Config{BaseURL: srv.URL, Model: "test", Thinking: ThinkingEnabled, ReasoningEffort: "high"}).Generate(context.Background(), input)
+	if err != nil || out.Text != "done" || out.ReasoningContent != "private reasoning" {
+		t.Fatalf("unexpected output: %+v err=%v", out, err)
+	}
+}
+
+func TestGenerateSendsThinkingDisabled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Thinking struct {
+				Type string `json:"type"`
+			} `json:"thinking"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.Thinking.Type != ThinkingDisabled {
+			t.Fatalf("thinking disabled missing from wire request: %+v", request)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"done"}}]}`)
+	}))
+	defer srv.Close()
+	if _, err := New(Config{BaseURL: srv.URL, Model: "test", Thinking: ThinkingDisabled}).Generate(context.Background(), ModelInputForTest("choose")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGenerateSendsForcedToolChoice(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ToolChoice model.ToolChoice `json:"tool_choice"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.ToolChoice != model.ToolChoiceForced {
+			t.Fatalf("forced tool choice missing from wire request: %+v", request)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"done"}}]}`)
+	}))
+	defer srv.Close()
+	input := ModelInputForTest("choose")
+	input.ToolChoice = model.ToolChoiceForced
+	if _, err := New(Config{BaseURL: srv.URL, Model: "test"}).Generate(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGenerateRejectsNonObjectToolSchemaBeforeHTTP(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	defer srv.Close()
+	input := ModelInputForTest("choose")
+	input.Tools = []model.ToolSpec{{Type: "function", Function: model.FunctionSpec{Name: "bad", Parameters: json.RawMessage(`{"type":"string"}`)}}}
+	_, err := New(Config{BaseURL: srv.URL, Model: "test"}).Generate(context.Background(), input)
+	if err == nil || !strings.Contains(err.Error(), `root type must be "object"`) || called {
+		t.Fatalf("expected local schema rejection, called=%v err=%v", called, err)
+	}
+}
+
 func TestGenerateSanitizesToolNamesInConversationHistory(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
@@ -110,7 +203,7 @@ func TestGenerateIncludesBodyWhenChoicesAreMissing(t *testing.T) {
 func TestStreamAssemblesToolDelta(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_","function":{"name":"weather","arguments":"{\"city\":"}}]}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"reasoning_content":"need weather","tool_calls":[{"index":0,"id":"call_","function":{"name":"weather","arguments":"{\"city\":"}}]}}]}`+"\n\n")
 		fmt.Fprint(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"1","function":{"arguments":"\"Shenzhen\"}"}}]}}]}`+"\n\n")
 		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
@@ -124,7 +217,7 @@ func TestStreamAssemblesToolDelta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.ToolCallDeltas) != 1 || first.ToolCallDeltas[0].Name != "weather" {
+	if first.ReasoningDelta != "need weather" || len(first.ToolCallDeltas) != 1 || first.ToolCallDeltas[0].Name != "weather" {
 		t.Fatalf("unexpected first delta: %+v", first)
 	}
 	second, err := s.Recv(context.Background())

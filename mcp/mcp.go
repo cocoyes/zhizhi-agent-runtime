@@ -148,12 +148,13 @@ func (p *Provider) allowed(name string) bool {
 
 func (p *Provider) normalize(definition *sdk.Tool) tool.Tool {
 	input, _ := json.Marshal(definition.InputSchema)
+	output, _ := json.Marshal(definition.OutputSchema)
 	capabilities := append([]string(nil), p.cfg.CapabilityMappings[definition.Name]...)
 	description := definition.Description
 	if description == "" {
 		description = definition.Name
 	}
-	spec := tool.Spec{ID: p.cfg.ID + "." + definition.Name, Description: description, InputSchema: input, Capabilities: capabilities, ProviderID: p.cfg.ID, Version: "mcp", SideEffect: tool.SideEffectUnknown, Idempotency: tool.IdempotencyUnknown, Retryable: false, RiskLevel: tool.RiskHigh, Confirmation: tool.ConfirmationOnRisk, TrustLevel: "untrusted"}
+	spec := tool.Spec{ID: p.cfg.ID + "." + definition.Name, Description: description, InputSchema: input, OutputSchema: output, Capabilities: capabilities, ProviderID: p.cfg.ID, Version: "mcp", SideEffect: tool.SideEffectUnknown, Idempotency: tool.IdempotencyUnknown, Retryable: false, RiskLevel: tool.RiskHigh, Confirmation: tool.ConfirmationOnRisk, TrustLevel: "untrusted"}
 	if configured, ok := p.cfg.ToolPolicies[definition.Name]; ok {
 		if configured.SideEffect != "" {
 			spec.SideEffect = configured.SideEffect
@@ -169,7 +170,7 @@ func (p *Provider) normalize(definition *sdk.Tool) tool.Tool {
 			spec.Confirmation = configured.Confirmation
 		}
 	}
-	return &remoteTool{provider: p, name: definition.Name, spec: spec, modelSpec: model.ToolSpec{Type: "function", Function: model.FunctionSpec{Name: spec.ID, Description: spec.Description, Parameters: input}, Capabilities: append([]string(nil), capabilities...)}}
+	return &remoteTool{provider: p, name: definition.Name, spec: spec, modelSpec: model.ToolSpec{Type: "function", Function: model.FunctionSpec{Name: spec.ID, Description: spec.Description, Parameters: input}, Capabilities: append([]string(nil), capabilities...), OutputSchema: output}}
 }
 
 type remoteTool struct {

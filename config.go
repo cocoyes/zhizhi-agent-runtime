@@ -18,10 +18,12 @@ type FileConfig struct {
 	MCP     FileMCPConfig     `yaml:"mcp"`
 }
 type FileModelConfig struct {
-	Type    string `yaml:"type"`
-	BaseURL string `yaml:"base_url"`
-	APIKey  string `yaml:"api_key"`
-	Model   string `yaml:"model"`
+	Type            string `yaml:"type"`
+	BaseURL         string `yaml:"base_url"`
+	APIKey          string `yaml:"api_key"`
+	Model           string `yaml:"model"`
+	Thinking        string `yaml:"thinking"`
+	ReasoningEffort string `yaml:"reasoning_effort"`
 }
 type FileAgentConfig struct {
 	SystemPrompt string `yaml:"system_prompt"`
@@ -64,7 +66,7 @@ func Load(path string) (Agent, error) {
 	if file.Model.BaseURL == "" || file.Model.Model == "" {
 		return nil, fmt.Errorf("config: model.base_url and model.model are required")
 	}
-	options := []Option{WithModel(openaicompat.New(openaicompat.Config{BaseURL: file.Model.BaseURL, APIKey: file.Model.APIKey, Model: file.Model.Model})), WithSystemPrompt(file.Agent.SystemPrompt), WithBudget(Budget{MaxSteps: file.Runtime.MaxSteps, MaxBatches: file.Runtime.MaxBatches, MaxModelCalls: file.Runtime.MaxModelCalls, MaxToolCalls: file.Runtime.MaxToolCalls, MaxReplans: file.Runtime.MaxReplans, MaxParallelSteps: file.Runtime.MaxParallelSteps, TargetLatency: file.Runtime.TargetLatency, OptionalCutoff: file.Runtime.OptionalCutoff, HardTimeout: file.Runtime.HardTimeout})}
+	options := []Option{WithModel(openaicompat.New(openaicompat.Config{BaseURL: file.Model.BaseURL, APIKey: file.Model.APIKey, Model: file.Model.Model, Thinking: file.Model.Thinking, ReasoningEffort: file.Model.ReasoningEffort})), WithSystemPrompt(file.Agent.SystemPrompt), WithBudget(Budget{MaxSteps: file.Runtime.MaxSteps, MaxBatches: file.Runtime.MaxBatches, MaxModelCalls: file.Runtime.MaxModelCalls, MaxToolCalls: file.Runtime.MaxToolCalls, MaxReplans: file.Runtime.MaxReplans, MaxParallelSteps: file.Runtime.MaxParallelSteps, TargetLatency: file.Runtime.TargetLatency, OptionalCutoff: file.Runtime.OptionalCutoff, HardTimeout: file.Runtime.HardTimeout})}
 	for _, server := range file.MCP.Servers {
 		transport := runtimemcp.Transport(server.Transport)
 		if transport == "" {

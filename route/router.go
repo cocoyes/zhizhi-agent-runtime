@@ -90,7 +90,12 @@ func (r ModelRouter) Route(ctx context.Context, input string, tools []model.Tool
 	if r.Model == nil {
 		return Intent{}, fmt.Errorf("router: model is required")
 	}
-	out, err := r.Model.Generate(ctx, model.ModelInput{Messages: []model.Message{{Role: model.RoleSystem, Content: "Classify the request. Return only JSON: {mode: chat|agent.simple|agent.complex, capabilities: string[], confidence: number, reason: string}. Capabilities must come only from the supplied tool catalog."}, {Role: model.RoleUser, Content: input}}, Tools: tools})
+	catalog, marshalErr := json.Marshal(model.PlanningToolCatalog(tools))
+	if marshalErr != nil {
+		return Intent{}, fmt.Errorf("router: encode tool catalog: %w", marshalErr)
+	}
+	user := input + "\nTool catalog (classification only; do not call):\n" + string(catalog)
+	out, err := r.Model.Generate(ctx, model.ModelInput{Messages: []model.Message{{Role: model.RoleSystem, Content: "Classify the request. Return only JSON: {mode: chat|agent.simple|agent.complex, capabilities: string[], confidence: number, reason: string}. Capabilities must come only from the supplied tool catalog."}, {Role: model.RoleUser, Content: user}}, JSONMode: true})
 	if err == nil {
 		var intent Intent
 		if json.Unmarshal([]byte(strings.TrimSpace(out.Text)), &intent) == nil {

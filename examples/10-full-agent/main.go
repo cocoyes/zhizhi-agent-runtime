@@ -53,16 +53,27 @@ func main() {
 		return itineraryOutput{Status: "已完成", Plan: "行程已准备好"}, nil
 	}, tool.WithCapabilities("itinerary.finish"))
 
+	thinking := os.Getenv("LLM_THINKING")
+	if thinking == "" {
+		thinking = openaicompat.ThinkingDisabled
+	}
+	reasoningEffort := os.Getenv("LLM_REASONING_EFFORT")
+	if reasoningEffort == "" {
+		reasoningEffort = "high"
+	}
 	modelClient := openaicompat.New(openaicompat.Config{
-		BaseURL: os.Getenv("LLM_BASE_URL"),
-		APIKey:  os.Getenv("LLM_API_KEY"),
-		Model:   os.Getenv("LLM_MODEL"),
+		BaseURL:         os.Getenv("LLM_BASE_URL"),
+		APIKey:          os.Getenv("LLM_API_KEY"),
+		Model:           os.Getenv("LLM_MODEL"),
+		Thinking:        thinking,
+		ReasoningEffort: reasoningEffort,
 	})
 	agent, err := zhizhi.New(
 		zhizhi.WithModel(modelClient),
 		zhizhi.WithTools(weather, outdoor, cached, indoor, compose, finish),
-		zhizhi.WithObserver(observe.NewJSONL(os.Stdout)),
+		zhizhi.WithObserver(observe.NewJSONL(os.Stdout, observe.WithDetails())),
 	)
+
 	if err != nil {
 		panic(err)
 	}

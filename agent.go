@@ -218,19 +218,20 @@ func (r *runtime) Run(ctx context.Context, req Request) (*Response, error) {
 			r.emit(observe.Event{Type: "run.failed", RunID: runID, Data: map[string]any{"error": "max model calls exceeded"}})
 			return nil, fmt.Errorf("budget: max model calls exceeded")
 		}
+		r.emit(observe.Event{Type: "model.request", RunID: runID, Data: map[string]any{"call": modelCalls}, Details: map[string]any{"messages": input.Messages, "tools": input.Tools}})
 		out, err := r.cfg.model.Generate(ctx, input)
 		if err != nil {
 			r.emit(observe.Event{Type: "run.failed", RunID: runID, Data: map[string]any{"error": err.Error()}})
 			return nil, err
 		}
 		usage = out.Usage
-		r.emit(observe.Event{Type: "model.completed", RunID: runID, Data: map[string]any{"tool_calls": len(out.ToolCalls), "total_tokens": out.Usage.TotalTokens}})
+		r.emit(observe.Event{Type: "model.completed", RunID: runID, Data: map[string]any{"tool_calls": len(out.ToolCalls), "total_tokens": out.Usage.TotalTokens}, Details: map[string]any{"content": out.Text, "tool_call_requests": out.ToolCalls}})
 		if len(out.ToolCalls) == 0 {
 			resp := &Response{RunID: runID, Text: out.Text, Usage: usage, ToolCalls: len(evidence), Evidence: evidence, Outcome: contract.OutcomeSuccess, Stats: contract.RunStats{ModelCalls: modelCalls, ToolCalls: toolCalls, TotalTokens: usage.TotalTokens, PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens, Duration: time.Since(started)}}
 			r.emit(observe.Event{Type: "run.completed", RunID: runID})
 			return resp, nil
 		}
-		input.Messages = append(input.Messages, model.Message{Role: model.RoleAssistant, ToolCalls: out.ToolCalls})
+		input.Messages = append(input.Messages, model.Message{Role: model.RoleAssistant, Content: out.Text, ReasoningContent: out.ReasoningContent, ToolCalls: out.ToolCalls})
 		for _, call := range out.ToolCalls {
 			toolCalls++
 			if r.cfg.budget.MaxToolCalls > 0 && toolCalls > r.cfg.budget.MaxToolCalls {
@@ -284,15 +285,19 @@ func (r *runtime) Run(ctx context.Context, req Request) (*Response, error) {
 func (r *runtime) runComplex(ctx context.Context, req Request, runID string) (*Response, error) {
 	p := r.cfg.planner
 	if p == nil {
-		p = planner.NewModelPlanner(r.cfg.model)
+		modelPlanner := planner.NewModelPlanner(r.cfg.model)
+		modelPlanner.Trace = func(event string, details map[string]any) {
+			r.emit(observe.Event{Type: "planner." + event, RunID: runID, Details: details})
+		}
+		p = modelPlanner
 	}
-	r.emit(observe.Event{Type: "planner.started", RunID: runID})
+	r.emit(observe.Event{Type: "planner.started", RunID: runID, Details: map[string]any{"request": req.Input, "tools": model.PlanningToolCatalog(r.registry.ModelSpecs())}})
 	semantic, err := p.Plan(ctx, req.Input, r.registry.ModelSpecs())
 	if err != nil {
 		r.emit(observe.Event{Type: "planner.failed", RunID: runID, Data: map[string]any{"error": err.Error()}})
 		return nil, err
 	}
-	r.emit(observe.Event{Type: "planner.completed", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"steps": len(semantic.Steps)}})
+	r.emit(observe.Event{Type: "planner.completed", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"steps": len(semantic.Steps)}, Details: map[string]any{"plan": semantic}})
 	semantic, err = plan.Optimize(semantic)
 	if err != nil {
 		return nil, err
@@ -321,7 +326,7 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string) (*R
 			return nil, fmt.Errorf("budget: max batches exceeded")
 		}
 		for _, batch := range execution.Batches {
-			r.emit(observe.Event{Type: "batch.started", RunID: runID, PlanVersion: semantic.Version, BatchIndex: batch.Index, Data: map[string]any{"steps": len(batch.Steps)}})
+			r.emit(observe.Event{Type: "batch.started", RunID: runID, PlanVersion: semantic.Version, BatchIndex: batch.Index, Data: map[string]any{"steps": len(batch.Steps)}, Details: map[string]any{"step_definitions": batch.Steps}})
 		}
 		parallel := r.maxParallel
 		if parallel < 1 {
@@ -338,6 +343,7 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string) (*R
 		// Let the scheduler resolve inputs so bindings can use evidence from
 		// completed dependency steps.
 		results, err = scheduler.Run(ctx, execution, nil)
+		r.emitStepResults(runID, semantic.Version, results)
 		if err == nil {
 			r.emit(observe.Event{Type: "plan.compiled", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"steps": len(semantic.Steps), "batches": len(execution.Batches)}})
 			for _, batch := range execution.Batches {
@@ -354,9 +360,15 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string) (*R
 		}
 		rp := r.cfg.replanner
 		if rp == nil {
-			rp = replan.NewModelReplanner(r.cfg.model)
+			modelReplanner := replan.NewModelReplanner(r.cfg.model)
+			modelReplanner.Trace = func(event string, details map[string]any) {
+				r.emit(observe.Event{Type: "replan." + event, RunID: runID, PlanVersion: semantic.Version, Details: details})
+			}
+			rp = modelReplanner
 		}
-		patch, patchErr := rp.Replan(ctx, replan.Input{Original: semantic, Failure: err.Error(), Tools: r.registry.ModelSpecs()})
+		replanInput := replan.Input{Original: semantic, Failure: err.Error(), Tools: r.registry.ModelSpecs()}
+		r.emit(observe.Event{Type: "replan.started", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"error": err.Error()}, Details: map[string]any{"request": map[string]any{"original": semantic, "failure": err.Error(), "tools": model.PlanningToolCatalog(replanInput.Tools)}}})
+		patch, patchErr := rp.Replan(ctx, replanInput)
 		if patchErr != nil {
 			return nil, fmt.Errorf("replan: execution failed: %v; replanner failed: %w", err, patchErr)
 		}
@@ -365,7 +377,7 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string) (*R
 			return nil, err
 		}
 		replans++
-		r.emit(observe.Event{Type: "replan.completed", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"version": semantic.Version, "replans": replans}})
+		r.emit(observe.Event{Type: "replan.completed", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"version": semantic.Version, "replans": replans}, Details: map[string]any{"patch": patch, "plan": semantic}})
 	}
 	evidence := make([]Evidence, 0, len(results))
 	var evidenceText strings.Builder
@@ -397,12 +409,40 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string) (*R
 		evidenceText.WriteString(result.StepID + ": " + string(b) + "\n")
 	}
 	finalInput := model.ModelInput{Messages: []model.Message{{Role: model.RoleSystem, Content: "Answer using only the provided evidence. Do not claim an action succeeded without a receipt."}, {Role: model.RoleUser, Content: req.Input + "\nEvidence:\n" + evidenceText.String()}}}
+	r.emit(observe.Event{Type: "final_composer.started", RunID: runID, Details: map[string]any{"messages": finalInput.Messages}})
 	final, err := r.cfg.model.Generate(ctx, finalInput)
 	if err != nil {
 		return nil, fmt.Errorf("final composer: %w", err)
 	}
+	r.emit(observe.Event{Type: "final_composer.completed", RunID: runID, Data: map[string]any{"total_tokens": final.Usage.TotalTokens}, Details: map[string]any{"content": final.Text}})
 	stats := contract.RunStats{ModelCalls: 2 + replans, ToolCalls: len(results), PlanSteps: len(semantic.Steps), Batches: len(execution.Batches), Replans: replans, Duration: time.Since(started), TotalTokens: final.Usage.TotalTokens, PromptTokens: final.Usage.PromptTokens, CompletionTokens: final.Usage.CompletionTokens}
 	return &Response{Text: final.Text, Usage: final.Usage, Outcome: outcome, Stats: stats, Warnings: warnings, ToolCalls: len(evidence), Evidence: evidence, PlanSteps: len(semantic.Steps), Batches: len(execution.Batches), Replans: replans, Actions: actions}, nil
+}
+
+func (r *runtime) emitStepResults(runID string, planVersion int, results []exec.StepResult) {
+	for _, result := range results {
+		eventType := "step.completed"
+		if result.Skipped {
+			eventType = "step.skipped"
+		} else if result.Err != nil {
+			eventType = "step.failed"
+		}
+		r.emit(observe.Event{
+			Type:        eventType,
+			RunID:       runID,
+			PlanVersion: planVersion,
+			StepID:      result.StepID,
+			ToolID:      result.ToolID,
+			Data: map[string]any{
+				"capability":  result.Capability,
+				"attempts":    result.Attempts,
+				"fallbacks":   result.Fallbacks,
+				"duration_ms": result.Duration.Milliseconds(),
+				"error":       errString(result.Err),
+			},
+			Details: map[string]any{"input": result.Input, "output": result.Content},
+		})
+	}
 }
 
 func (r *runtime) emit(event observe.Event) {
@@ -455,12 +495,14 @@ func (r *runtime) Stream(ctx context.Context, req Request) (EventStream, error) 
 }
 
 type eventStream struct {
-	stream    model.Stream
-	runtime   *runtime
-	input     model.ModelInput
-	calls     map[int]model.ToolCallRequest
-	processed bool
-	closed    bool
+	stream           model.Stream
+	runtime          *runtime
+	input            model.ModelInput
+	calls            map[int]model.ToolCallRequest
+	processed        bool
+	closed           bool
+	assistantText    string
+	reasoningContent string
 }
 
 func (s *eventStream) Recv(ctx context.Context) (Event, error) {
@@ -475,6 +517,8 @@ func (s *eventStream) Recv(ctx context.Context) (Event, error) {
 		return Event{}, err
 	}
 	result := Event{TextDelta: ev.TextDelta}
+	s.assistantText += ev.TextDelta
+	s.reasoningContent += ev.ReasoningDelta
 	for i := range ev.ToolCallDeltas {
 		delta := ev.ToolCallDeltas[i]
 		call := s.calls[delta.Index]
@@ -501,7 +545,7 @@ func (s *eventStream) finishToolCalls(ctx context.Context) (Event, error) {
 			ordered = append(ordered, call)
 		}
 	}
-	s.input.Messages = append(s.input.Messages, model.Message{Role: model.RoleAssistant, ToolCalls: ordered})
+	s.input.Messages = append(s.input.Messages, model.Message{Role: model.RoleAssistant, Content: s.assistantText, ReasoningContent: s.reasoningContent, ToolCalls: ordered})
 	actions := make([]contract.ActionReceipt, 0)
 	evidence := make([]contract.Evidence, 0, len(ordered))
 	for _, call := range ordered {

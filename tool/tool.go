@@ -110,7 +110,11 @@ type funcTool[I any, O any] struct {
 }
 
 func Func[I any, O any](name, description string, fn func(context.Context, I) (O, error), options ...FuncOption) Tool {
-	r := new(jsonschema.Reflector)
+	// Function-calling APIs require the parameters schema itself to expose its
+	// type. DoNotReference keeps struct schemas inline instead of emitting only
+	// a top-level $ref, while still supporting legacy scalar tool types here so
+	// they can fail with a clear adapter error if sent to a model.
+	r := &jsonschema.Reflector{DoNotReference: true}
 	in := r.Reflect(new(I))
 	input, _ := json.Marshal(in)
 	out := r.Reflect(new(O))
@@ -144,7 +148,7 @@ func (s Spec) Validate() error {
 
 func (t *funcTool[I, O]) Spec() Spec { return t.spec }
 func (t *funcTool[I, O]) ModelSpec() model.ToolSpec {
-	return model.ToolSpec{Type: "function", Function: model.FunctionSpec{Name: t.spec.ID, Description: t.spec.Description, Parameters: t.spec.InputSchema}, Capabilities: append([]string(nil), t.spec.Capabilities...)}
+	return model.ToolSpec{Type: "function", Function: model.FunctionSpec{Name: t.spec.ID, Description: t.spec.Description, Parameters: t.spec.InputSchema}, Capabilities: append([]string(nil), t.spec.Capabilities...), OutputSchema: t.spec.OutputSchema}
 }
 func (t *funcTool[I, O]) Call(ctx context.Context, raw json.RawMessage) (Result, error) {
 	if err := ValidateInput(t.spec, raw); err != nil {

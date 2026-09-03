@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +26,7 @@ type StepResult struct {
 	Attempts   int
 	Fallbacks  int
 	Skipped    bool
+	Input      json.RawMessage
 }
 
 type InputResolver func(Step) json.RawMessage
@@ -162,6 +162,7 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 					}
 					payload, _ = json.Marshal(bound)
 				}
+				result.Input = append(json.RawMessage(nil), payload...)
 				candidateSpec := candidates[0].Spec()
 				if candidateSpec.RequiresConfirmation() {
 					approved := false
@@ -225,7 +226,7 @@ func conditionMatches(source any, path string, expected any) (bool, bool) {
 	if err := json.Unmarshal(encoded, &generic); err != nil {
 		return false, false
 	}
-	value, ok := lookupCondition(generic, path)
+	value, ok := bindingresolve.Lookup(generic, path)
 	if !ok {
 		return false, false
 	}
@@ -242,20 +243,6 @@ func normalizeConditionValue(value any) any {
 		return value
 	}
 	return normalized
-}
-
-func lookupCondition(value any, path string) (any, bool) {
-	for _, part := range strings.Split(strings.TrimPrefix(path, "."), ".") {
-		object, ok := value.(map[string]any)
-		if !ok {
-			return nil, false
-		}
-		value, ok = object[part]
-		if !ok {
-			return nil, false
-		}
-	}
-	return value, true
 }
 
 func deadlineFromContext(ctx context.Context) time.Time {

@@ -54,6 +54,44 @@ func TestRunFunctionToolThroughPublicAPI(t *testing.T) {
 	}
 }
 
+type reasoningToolModel struct {
+	calls int
+	t     *testing.T
+}
+
+func (m *reasoningToolModel) ID() string { return "reasoning-tool" }
+func (m *reasoningToolModel) Capabilities() model.ModelCapabilities {
+	return model.ModelCapabilities{ToolCalling: true}
+}
+func (m *reasoningToolModel) Generate(_ context.Context, input model.ModelInput) (*model.ModelOutput, error) {
+	m.calls++
+	if m.calls == 1 {
+		return &model.ModelOutput{Text: "checking", ReasoningContent: "need the tool", ToolCalls: []model.ToolCallRequest{{ID: "call-1", Type: "function", Function: struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}{Name: "lookup", Arguments: `{}`}}}}, nil
+	}
+	if len(input.Messages) < 2 || input.Messages[len(input.Messages)-2].ReasoningContent != "need the tool" || input.Messages[len(input.Messages)-2].Content != "checking" {
+		m.t.Fatalf("assistant reasoning/content were not preserved for the tool continuation: %+v", input.Messages)
+	}
+	return &model.ModelOutput{Text: "done"}, nil
+}
+func (m *reasoningToolModel) Stream(context.Context, model.ModelInput) (model.Stream, error) {
+	return nil, nil
+}
+
+func TestRunPreservesReasoningContentAcrossToolCalls(t *testing.T) {
+	m := &reasoningToolModel{t: t}
+	a, err := New(WithModel(m), WithTools(tool.Func("lookup", "lookup", func(context.Context, struct{}) (string, error) { return "result", nil })))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := a.Run(context.Background(), Request{Input: "lookup"})
+	if err != nil || resp.Text != "done" || m.calls != 2 {
+		t.Fatalf("unexpected response: %+v err=%v", resp, err)
+	}
+}
+
 func TestBudgetAndGuard(t *testing.T) {
 	m := &scriptedModel{}
 	weather := tool.Func("weather.get", "weather", func(context.Context, struct{}) (string, error) { return "ok", nil })

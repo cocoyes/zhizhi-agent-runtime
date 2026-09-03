@@ -38,6 +38,32 @@ Agent 生命周期清晰可见：
 
 内置适配器请求 `{LLM_BASE_URL}/chat/completions`，支持标准 Chat Completions 响应，也支持 Responses 风格的 `output_text` 或 `output[].content[].text` 文本响应。内部工具 ID 可以使用点号，适配器只在发送给模型时转换为合法的 wire 名称。
 
+DeepSeek、豆包等混合推理模型可通过适配器显式控制思考模式：
+
+```go
+model := openaicompat.New(openaicompat.Config{
+    BaseURL:         os.Getenv("LLM_BASE_URL"),
+    APIKey:          os.Getenv("LLM_API_KEY"),
+    Model:           os.Getenv("LLM_MODEL"),
+    Thinking:        openaicompat.ThinkingEnabled, // 或 ThinkingDisabled / ThinkingAuto
+    ReasoningEffort: "high",
+})
+```
+
+适配器会发送 `thinking: {"type":"..."}` 和顶层 `reasoning_effort`。思考模式结合工具调用时，返回的 `reasoning_content` 会在同一轮后续请求中自动回传。具体枚举范围仍取决于 provider 和模型版本；不配置时保持服务端默认行为。示例 10 也支持环境变量 `LLM_THINKING` 和 `LLM_REASONING_EFFORT`。
+
+排查规划或工具参数问题时，可启用详细 JSONL：
+
+```go
+zhizhi.WithObserver(observe.NewJSONL(os.Stdout, observe.WithDetails()))
+```
+
+详细模式会记录 planner/replanner 的模型请求、原始响应和修复重试、每个步骤的实际输入/输出/错误、最终 patch，以及最终合成请求与响应。它可能包含用户或业务数据，因此默认关闭；示例 10 已显式开启。
+
+模型结构化输出不再由运行时手写拆解：非标准 JSON 的提取和修复使用 `jsonrepair-go`，常见弱类型漂移使用 `mapstructure/v2`，跨步骤路径按 RFC 6901 交给 `go-openapi/jsonpointer`。语法修复后仍须通过计划、JSON Schema 和 patch 应用校验，不会因“能反序列化”就继续执行。
+
+Planner 和 Replanner 的主路径参考 Eino 的结构化输出设计：从 Go 类型生成 JSON Schema，将 Plan 或 Patch 作为唯一的 synthetic output tool，并使用强制 `tool_choice`，只消费该工具的 arguments。普通 JSON 文本仅作为不支持工具调用模型的兼容路径；业务工具只作为规划目录，不会在规划阶段被调用。
+
 ## 安装与最小示例
 
 ```bash
