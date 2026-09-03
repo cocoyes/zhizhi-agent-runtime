@@ -4,8 +4,8 @@
   <img src="zhizhi-logo.png" alt="Zhizhi agent runtime" width="720">
 </p>
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/zhizhi-ai/zhizhi-agent-runtime.svg)](https://pkg.go.dev/github.com/zhizhi-ai/zhizhi-agent-runtime)
-[![Go Report Card](https://goreportcard.com/badge/github.com/zhizhi-ai/zhizhi-agent-runtime)](https://goreportcard.com/report/github.com/zhizhi-ai/zhizhi-agent-runtime)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cocoyes/zhizhi-agent-runtime.svg)](https://pkg.go.dev/github.com/cocoyes/zhizhi-agent-runtime)
+[![Go Report Card](https://goreportcard.com/badge/github.com/cocoyes/zhizhi-agent-runtime)](https://goreportcard.com/report/github.com/cocoyes/zhizhi-agent-runtime)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 [中文文档](README.zh-CN.md)
@@ -70,7 +70,7 @@ The planner and replanner follow Eino's structured-output pattern on their prima
 ## Install
 
 ```bash
-go get github.com/zhizhi-ai/zhizhi-agent-runtime
+go get github.com/cocoyes/zhizhi-agent-runtime
 ```
 
 ## Quickstart
@@ -84,8 +84,8 @@ import (
     "log"
     "os"
 
-    zhizhi "github.com/zhizhi-ai/zhizhi-agent-runtime"
-    "github.com/zhizhi-ai/zhizhi-agent-runtime/adapter/model/openaicompat"
+    zhizhi "github.com/cocoyes/zhizhi-agent-runtime"
+    "github.com/cocoyes/zhizhi-agent-runtime/adapter/model/openaicompat"
 )
 
 func main() {
@@ -233,7 +233,7 @@ The default policy retries only transient, safe, idempotent failures. Writes are
 ## MCP
 
 ```go
-import runtimemcp "github.com/zhizhi-ai/zhizhi-agent-runtime/mcp"
+import runtimemcp "github.com/cocoyes/zhizhi-agent-runtime/mcp"
 
 agent, err := zhizhi.New(
     zhizhi.WithModel(model),
@@ -253,7 +253,7 @@ MCP tools are treated as an untrusted boundary. See [SECURITY.md](SECURITY.md).
 ```go
 import (
     "os"
-    "github.com/zhizhi-ai/zhizhi-agent-runtime/observe"
+    "github.com/cocoyes/zhizhi-agent-runtime/observe"
 )
 
 observer := observe.NewJSONL(os.Stdout)

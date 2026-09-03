@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/contract"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/model"
+	"github.com/cocoyes/zhizhi-agent-runtime/contract"
+	"github.com/cocoyes/zhizhi-agent-runtime/model"
 )
 
 func TestGenerate(t *testing.T) {

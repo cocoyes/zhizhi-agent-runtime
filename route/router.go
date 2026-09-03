@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/model"
+	"github.com/cocoyes/zhizhi-agent-runtime/model"
 )
 
 type Mode string

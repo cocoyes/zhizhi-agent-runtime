@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/contract"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/model"
+	"github.com/cocoyes/zhizhi-agent-runtime/contract"
+	"github.com/cocoyes/zhizhi-agent-runtime/model"
 )
 
 type Config struct {

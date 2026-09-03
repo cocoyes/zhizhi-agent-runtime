@@ -2,8 +2,9 @@ package capability
 
 import (
 	"fmt"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/tool"
 	"sort"
+
+	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
 type Candidate struct {

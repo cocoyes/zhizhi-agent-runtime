@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocoyes/zhizhi-agent-runtime/contract"
+	"github.com/cocoyes/zhizhi-agent-runtime/model"
 	"github.com/invopop/jsonschema"
 	jsonschema6 "github.com/santhosh-tekuri/jsonschema/v6"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/contract"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/model"
 )
 
 type SideEffectClass string

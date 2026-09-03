@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/model"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/plan"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/replan"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/tool"
+	"github.com/cocoyes/zhizhi-agent-runtime/model"
+	"github.com/cocoyes/zhizhi-agent-runtime/plan"
+	"github.com/cocoyes/zhizhi-agent-runtime/replan"
+	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
 type complexModel struct{ calls int }

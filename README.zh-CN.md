@@ -4,8 +4,8 @@
   <img src="zhizhi-logo.png" alt="Zhizhi Agent Runtime Logo" width="720">
 </p>
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/zhizhi-ai/zhizhi-agent-runtime.svg)](https://pkg.go.dev/github.com/zhizhi-ai/zhizhi-agent-runtime)
-[![Go Report Card](https://goreportcard.com/badge/github.com/zhizhi-ai/zhizhi-agent-runtime)](https://goreportcard.com/report/github.com/zhizhi-ai/zhizhi-agent-runtime)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cocoyes/zhizhi-agent-runtime.svg)](https://pkg.go.dev/github.com/cocoyes/zhizhi-agent-runtime)
+[![Go Report Card](https://goreportcard.com/badge/github.com/cocoyes/zhizhi-agent-runtime)](https://goreportcard.com/report/github.com/cocoyes/zhizhi-agent-runtime)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 [English README](README.md)
@@ -67,7 +67,7 @@ Planner 和 Replanner 的主路径参考 Eino 的结构化输出设计：从 Go 
 ## 安装与最小示例
 
 ```bash
-go get github.com/zhizhi-ai/zhizhi-agent-runtime
+go get github.com/cocoyes/zhizhi-agent-runtime
 ```
 
 ```go
@@ -208,8 +208,8 @@ zhizhi.WithBudget(zhizhi.Budget{
 ```go
 import (
     "os"
-    runtimemcp "github.com/zhizhi-ai/zhizhi-agent-runtime/mcp"
-    "github.com/zhizhi-ai/zhizhi-agent-runtime/observe"
+    runtimemcp "github.com/cocoyes/zhizhi-agent-runtime/mcp"
+    "github.com/cocoyes/zhizhi-agent-runtime/observe"
 )
 
 agent, err := zhizhi.New(

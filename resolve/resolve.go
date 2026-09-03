@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cocoyes/zhizhi-agent-runtime/model"
+	"github.com/cocoyes/zhizhi-agent-runtime/plan"
 	"github.com/go-openapi/jsonpointer"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/model"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/plan"
 )
 
 type Binding = plan.InputBinding

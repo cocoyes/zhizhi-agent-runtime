@@ -1,8 +1,8 @@
 package mcp
 
 import (
+	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/tool"
 	"testing"
 )
 

@@ -5,7 +5,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/observe"
+	"github.com/cocoyes/zhizhi-agent-runtime/observe"
 )
 
 type Trace struct {

@@ -1,4 +1,4 @@
-module github.com/zhizhi-ai/zhizhi-agent-runtime
+module github.com/cocoyes/zhizhi-agent-runtime
 
 go 1.25.0
 

@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/contract"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/plan"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/tool"
+	"github.com/cocoyes/zhizhi-agent-runtime/contract"
+	"github.com/cocoyes/zhizhi-agent-runtime/plan"
+	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 	"go.uber.org/goleak"
 )
 

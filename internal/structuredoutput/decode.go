@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/cocoyes/zhizhi-agent-runtime/model"
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/invopop/jsonschema"
 	jsonrepair "github.com/silaswei-io/jsonrepair-go"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/model"
 )
 
 // SchemaFor derives the JSON Schema supplied to a structured-output tool.

@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/internal/structuredoutput"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/model"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/plan"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/tool"
+	"github.com/cocoyes/zhizhi-agent-runtime/internal/structuredoutput"
+	"github.com/cocoyes/zhizhi-agent-runtime/model"
+	"github.com/cocoyes/zhizhi-agent-runtime/plan"
+	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
 type Planner interface {

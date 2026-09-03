@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	zhizhi "github.com/zhizhi-ai/zhizhi-agent-runtime"
+	zhizhi "github.com/cocoyes/zhizhi-agent-runtime"
 	"os"
 )
 

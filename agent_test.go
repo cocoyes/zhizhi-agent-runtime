@@ -7,9 +7,9 @@ import (
 	"io"
 	"testing"
 
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/contract"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/model"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/tool"
+	"github.com/cocoyes/zhizhi-agent-runtime/contract"
+	"github.com/cocoyes/zhizhi-agent-runtime/model"
+	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
 type scriptedModel struct{ calls int }

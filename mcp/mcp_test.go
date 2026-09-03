@@ -6,10 +6,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/cocoyes/zhizhi-agent-runtime/contract"
+	"github.com/cocoyes/zhizhi-agent-runtime/security"
+	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/contract"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/security"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/tool"
 )
 
 func TestAllowDenyAndNormalize(t *testing.T) {

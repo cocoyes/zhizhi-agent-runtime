@@ -2,8 +2,8 @@ package exec
 
 import (
 	"context"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/plan"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/tool"
+	"github.com/cocoyes/zhizhi-agent-runtime/plan"
+	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 	"testing"
 	"time"
 )

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/contract"
+	"github.com/cocoyes/zhizhi-agent-runtime/contract"
 )
 
 type testArgs struct {

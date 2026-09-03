@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/adapter/model/openaicompat"
-	runtimemcp "github.com/zhizhi-ai/zhizhi-agent-runtime/mcp"
+	"github.com/cocoyes/zhizhi-agent-runtime/adapter/model/openaicompat"
+	runtimemcp "github.com/cocoyes/zhizhi-agent-runtime/mcp"
 	"gopkg.in/yaml.v3"
 )
 

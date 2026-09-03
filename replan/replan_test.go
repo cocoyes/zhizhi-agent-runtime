@@ -3,8 +3,8 @@ package replan
 import (
 	"context"
 	"encoding/json"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/model"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/plan"
+	"github.com/cocoyes/zhizhi-agent-runtime/model"
+	"github.com/cocoyes/zhizhi-agent-runtime/plan"
 	"testing"
 )
 

@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocoyes/zhizhi-agent-runtime/contract"
+	"github.com/cocoyes/zhizhi-agent-runtime/model"
+	"github.com/cocoyes/zhizhi-agent-runtime/security"
+	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/contract"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/model"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/security"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/tool"
 )
 
 type Transport string

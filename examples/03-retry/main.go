@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/policy"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/tool"
+	"github.com/cocoyes/zhizhi-agent-runtime/policy"
+	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
 func main() {

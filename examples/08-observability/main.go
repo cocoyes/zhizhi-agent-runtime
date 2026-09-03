@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 
-	zhizhi "github.com/zhizhi-ai/zhizhi-agent-runtime"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/adapter/model/openaicompat"
-	"github.com/zhizhi-ai/zhizhi-agent-runtime/observe"
+	zhizhi "github.com/cocoyes/zhizhi-agent-runtime"
+	"github.com/cocoyes/zhizhi-agent-runtime/adapter/model/openaicompat"
+	"github.com/cocoyes/zhizhi-agent-runtime/observe"
 )
 
 func main() {
