@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cocoyes/zhizhi-agent-runtime/contract"
@@ -21,6 +22,13 @@ type Transport string
 
 const TransportStreamableHTTP Transport = "streamable-http"
 
+type ConnectionStrategy string
+
+const (
+	ConnectionLazy  ConnectionStrategy = "lazy"
+	ConnectionEager ConnectionStrategy = "eager"
+)
+
 type Config struct {
 	ID                 string
 	Transport          Transport
@@ -31,6 +39,11 @@ type Config struct {
 	ToolPolicies       map[string]ToolPolicy
 	Headers            map[string]string
 	ConnectTimeout     time.Duration
+	CloseTimeout       time.Duration
+	ConnectionStrategy ConnectionStrategy
+	Required           bool
+	MaxConnectAttempts int
+	ReconnectBackoff   time.Duration
 }
 
 // ToolPolicy is the application-owned side-effect declaration for an MCP
@@ -45,18 +58,37 @@ type ToolPolicy struct {
 }
 
 type Provider struct {
-	cfg     Config
-	session *sdk.ClientSession
-	tools   []tool.Tool
+	cfg         Config
+	mu          sync.RWMutex
+	session     *sdk.ClientSession
+	tools       []tool.Tool
+	fingerprint string
+	loadedAt    time.Time
+	version     uint64
+	connecting  chan struct{}
+	closed      bool
 }
 type Catalog struct {
 	ProviderID  string
 	Fingerprint string
+	Version     uint64
 	LoadedAt    time.Time
 	Tools       []tool.Tool
 }
 
 func Connect(ctx context.Context, cfg Config) (*Provider, error) {
+	provider, err := NewProvider(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := provider.Ensure(ctx); err != nil {
+		return nil, err
+	}
+	return provider, nil
+}
+
+// NewProvider validates configuration without performing network I/O.
+func NewProvider(cfg Config) (*Provider, error) {
 	if cfg.ID == "" {
 		return nil, fmt.Errorf("mcp: server id is required")
 	}
@@ -66,68 +98,228 @@ func Connect(ctx context.Context, cfg Config) (*Provider, error) {
 	if cfg.Transport == "" {
 		cfg.Transport = TransportStreamableHTTP
 	}
+	if cfg.Transport != TransportStreamableHTTP {
+		return nil, fmt.Errorf("mcp %s: unsupported transport %q", cfg.ID, cfg.Transport)
+	}
 	if cfg.ConnectTimeout <= 0 {
 		cfg.ConnectTimeout = 10 * time.Second
 	}
-	connectCtx, cancel := context.WithTimeout(ctx, cfg.ConnectTimeout)
-	defer cancel()
-	httpClient := &http.Client{Transport: headerTransport{base: http.DefaultTransport, headers: cfg.Headers}}
-	client := sdk.NewClient(&sdk.Implementation{Name: "zhizhi-agent-runtime", Version: "1.0.0"}, nil)
-	transport := &sdk.StreamableClientTransport{Endpoint: cfg.Endpoint, HTTPClient: httpClient, DisableStandaloneSSE: true}
-	session, err := client.Connect(connectCtx, transport, nil)
-	if err != nil {
-		return nil, fmt.Errorf("mcp %s connect: %w", cfg.ID, err)
+	if cfg.CloseTimeout <= 0 {
+		cfg.CloseTimeout = 5 * time.Second
 	}
-	provider := &Provider{cfg: cfg, session: session}
-	if err := provider.refresh(connectCtx); err != nil {
-		session.Close()
-		return nil, err
+	if cfg.ConnectionStrategy == "" {
+		cfg.ConnectionStrategy = ConnectionLazy
 	}
-	return provider, nil
+	if cfg.ConnectionStrategy != ConnectionLazy && cfg.ConnectionStrategy != ConnectionEager {
+		return nil, fmt.Errorf("mcp %s: invalid connection strategy %q", cfg.ID, cfg.ConnectionStrategy)
+	}
+	if cfg.MaxConnectAttempts <= 0 {
+		cfg.MaxConnectAttempts = 1
+	}
+	if cfg.ReconnectBackoff <= 0 {
+		cfg.ReconnectBackoff = 100 * time.Millisecond
+	}
+	return &Provider{cfg: cfg}, nil
 }
 
-func (p *Provider) refresh(ctx context.Context) error {
-	result, err := p.session.ListTools(ctx, nil)
+func (p *Provider) connect(ctx context.Context) (*sdk.ClientSession, []tool.Tool, error) {
+	connectCtx, cancel := context.WithTimeout(ctx, p.cfg.ConnectTimeout)
+	defer cancel()
+	httpClient := &http.Client{Transport: headerTransport{base: http.DefaultTransport, headers: p.cfg.Headers}}
+	client := sdk.NewClient(&sdk.Implementation{Name: "zhizhi-agent-runtime", Version: "1.0.0"}, nil)
+	transport := &sdk.StreamableClientTransport{Endpoint: p.cfg.Endpoint, HTTPClient: httpClient, DisableStandaloneSSE: true}
+	session, err := client.Connect(connectCtx, transport, nil)
 	if err != nil {
-		return fmt.Errorf("mcp %s list tools: %w", p.cfg.ID, err)
+		return nil, nil, fmt.Errorf("mcp %s connect: %w", p.cfg.ID, err)
 	}
-	p.tools = make([]tool.Tool, 0, len(result.Tools))
+	result, err := session.ListTools(connectCtx, nil)
+	if err != nil {
+		session.Close()
+		return nil, nil, fmt.Errorf("mcp %s list tools: %w", p.cfg.ID, err)
+	}
+	values := make([]tool.Tool, 0, len(result.Tools))
 	for _, definition := range result.Tools {
-		if definition == nil || !p.allowed(definition.Name) {
+		if definition == nil || !p.allowed(definition.Name) || security.ValidateToolText(definition.Description) != nil {
 			continue
 		}
-		if security.ValidateToolText(definition.Description) != nil {
-			continue
-		}
-		p.tools = append(p.tools, p.normalize(definition))
+		values = append(values, p.normalize(definition))
 	}
-	sort.Slice(p.tools, func(i, j int) bool { return p.tools[i].Spec().ID < p.tools[j].Spec().ID })
-	return nil
+	sort.Slice(values, func(i, j int) bool { return values[i].Spec().ID < values[j].Spec().ID })
+	return session, values, nil
 }
-func (p *Provider) Tools() []tool.Tool { return append([]tool.Tool(nil), p.tools...) }
+
+// Ensure establishes at most one session under concurrent first access.
+func (p *Provider) Ensure(ctx context.Context) error {
+	for {
+		p.mu.Lock()
+		if p.closed {
+			p.mu.Unlock()
+			return fmt.Errorf("mcp %s: provider is closed", p.cfg.ID)
+		}
+		if p.session != nil {
+			p.mu.Unlock()
+			return nil
+		}
+		if wait := p.connecting; wait != nil {
+			p.mu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		wait := make(chan struct{})
+		p.connecting = wait
+		p.mu.Unlock()
+
+		var session *sdk.ClientSession
+		var values []tool.Tool
+		var err error
+		for attempt := 0; attempt < p.cfg.MaxConnectAttempts; attempt++ {
+			session, values, err = p.connect(ctx)
+			if err == nil {
+				break
+			}
+			if attempt+1 < p.cfg.MaxConnectAttempts {
+				select {
+				case <-time.After(p.cfg.ReconnectBackoff << attempt):
+				case <-ctx.Done():
+					err = ctx.Err()
+					attempt = p.cfg.MaxConnectAttempts
+				}
+			}
+		}
+		p.mu.Lock()
+		if err == nil && !p.closed {
+			p.session, p.tools = session, values
+			p.version++
+			p.loadedAt = time.Now().UTC()
+			p.fingerprint = fingerprint(values)
+		} else {
+			if session != nil {
+				_ = session.Close()
+			}
+			if err == nil {
+				err = fmt.Errorf("mcp %s: provider closed during connection", p.cfg.ID)
+			}
+		}
+		p.connecting = nil
+		close(wait)
+		p.mu.Unlock()
+		return err
+	}
+}
+func (p *Provider) Tools() []tool.Tool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return append([]tool.Tool(nil), p.tools...)
+}
 func (p *Provider) Catalog() Catalog {
-	return Catalog{ProviderID: p.cfg.ID, Fingerprint: p.Fingerprint(), LoadedAt: time.Now().UTC(), Tools: p.Tools()}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return Catalog{ProviderID: p.cfg.ID, Fingerprint: p.fingerprint, Version: p.version, LoadedAt: p.loadedAt, Tools: append([]tool.Tool(nil), p.tools...)}
 }
 func (p *Provider) Fingerprint() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return fingerprint(p.tools)
+}
+func fingerprint(values []tool.Tool) string {
 	h := sha256.New()
-	for _, value := range p.tools {
+	for _, value := range values {
 		spec := value.Spec()
 		_, _ = h.Write([]byte(spec.ID + "\x00" + spec.Description + "\x00" + string(spec.InputSchema)))
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
-func (p *Provider) Refresh(ctx context.Context) error { return p.refresh(ctx) }
-func (p *Provider) Healthy() bool                     { return p != nil && p.session != nil }
+func (p *Provider) Refresh(ctx context.Context) error {
+	if err := p.Ensure(ctx); err != nil {
+		return err
+	}
+	p.mu.RLock()
+	session := p.session
+	p.mu.RUnlock()
+	result, err := session.ListTools(ctx, nil)
+	if err != nil {
+		p.invalidate(session)
+		return fmt.Errorf("mcp %s refresh: %w", p.cfg.ID, err)
+	}
+	values := make([]tool.Tool, 0, len(result.Tools))
+	for _, definition := range result.Tools {
+		if definition != nil && p.allowed(definition.Name) && security.ValidateToolText(definition.Description) == nil {
+			values = append(values, p.normalize(definition))
+		}
+	}
+	sort.Slice(values, func(i, j int) bool { return values[i].Spec().ID < values[j].Spec().ID })
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return fmt.Errorf("mcp %s: provider is closed", p.cfg.ID)
+	}
+	p.tools = values
+	p.version++
+	p.loadedAt = time.Now().UTC()
+	p.fingerprint = fingerprint(values)
+	p.mu.Unlock()
+	return nil
+}
+func (p *Provider) Healthy() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.session != nil && !p.closed
+}
 func (p *Provider) AddToRegistry(registry *tool.Registry) {
-	for _, value := range p.tools {
+	for _, value := range p.Tools() {
 		registry.Add(value)
 	}
 }
 func (p *Provider) Close() error {
-	if p == nil || p.session == nil {
+	if p == nil {
 		return nil
 	}
-	return p.session.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), p.cfg.CloseTimeout)
+	defer cancel()
+	return p.CloseContext(ctx)
+}
+func (p *Provider) CloseContext(ctx context.Context) error {
+	p.mu.Lock()
+	p.closed = true
+	session := p.session
+	p.session = nil
+	p.mu.Unlock()
+	if session == nil {
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- session.Close() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *Provider) invalidate(session *sdk.ClientSession) {
+	p.mu.Lock()
+	if p.session == session {
+		p.session = nil
+	}
+	p.mu.Unlock()
+	_ = session.Close()
+}
+
+func (p *Provider) sessionFor(ctx context.Context) (*sdk.ClientSession, error) {
+	if err := p.Ensure(ctx); err != nil {
+		return nil, err
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.session, nil
 }
 func (p *Provider) allowed(name string) bool {
 	for _, denied := range p.cfg.DenyTools {
@@ -147,8 +339,14 @@ func (p *Provider) allowed(name string) bool {
 }
 
 func (p *Provider) normalize(definition *sdk.Tool) tool.Tool {
-	input, _ := json.Marshal(definition.InputSchema)
-	output, _ := json.Marshal(definition.OutputSchema)
+	input, inputErr := json.Marshal(definition.InputSchema)
+	if inputErr != nil {
+		input = json.RawMessage(`[`)
+	}
+	output, outputErr := json.Marshal(definition.OutputSchema)
+	if outputErr != nil {
+		output = json.RawMessage(`[`)
+	}
 	capabilities := append([]string(nil), p.cfg.CapabilityMappings[definition.Name]...)
 	description := definition.Description
 	if description == "" {
@@ -170,6 +368,9 @@ func (p *Provider) normalize(definition *sdk.Tool) tool.Tool {
 			spec.Confirmation = configured.Confirmation
 		}
 	}
+	if spec.Idempotency == tool.IdempotencyNonIdempotent || spec.Idempotency == tool.IdempotencyUnknown {
+		spec.Retryable = false
+	}
 	return &remoteTool{provider: p, name: definition.Name, spec: spec, modelSpec: model.ToolSpec{Type: "function", Function: model.FunctionSpec{Name: spec.ID, Description: spec.Description, Parameters: input}, Capabilities: append([]string(nil), capabilities...), OutputSchema: output}}
 }
 
@@ -187,8 +388,13 @@ func (t *remoteTool) Call(ctx context.Context, raw json.RawMessage) (tool.Result
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return tool.Result{}, fmt.Errorf("mcp tool %s invalid arguments: %w", t.spec.ID, err)
 	}
-	result, err := t.provider.session.CallTool(ctx, &sdk.CallToolParams{Name: t.name, Arguments: args})
+	session, err := t.provider.sessionFor(ctx)
 	if err != nil {
+		return tool.Result{}, err
+	}
+	result, err := session.CallTool(ctx, &sdk.CallToolParams{Name: t.name, Arguments: args})
+	if err != nil {
+		t.provider.invalidate(session)
 		return tool.Result{}, fmt.Errorf("mcp tool %s call: %w", t.spec.ID, err)
 	}
 	if result.IsError {

@@ -10,6 +10,7 @@ const (
 	OutcomeDegraded       RunOutcome = "DEGRADED"
 	OutcomeFailed         RunOutcome = "FAILED"
 	OutcomeCancelled      RunOutcome = "CANCELLED"
+	OutcomeSuspended      RunOutcome = "SUSPENDED"
 )
 
 type Warning struct {
@@ -56,6 +57,8 @@ type ActionReceipt struct {
 type RunStats struct {
 	ModelCalls       int           `json:"model_calls"`
 	ToolCalls        int           `json:"tool_calls"`
+	SuccessfulTools  int           `json:"successful_tools"`
+	FailedTools      int           `json:"failed_tools"`
 	PlanSteps        int           `json:"plan_steps"`
 	Batches          int           `json:"batches"`
 	ParallelSteps    int           `json:"parallel_steps"`

@@ -1,7 +1,5 @@
 package runtimeerr
 
-import "fmt"
-
 type Class string
 
 const (
@@ -28,10 +26,7 @@ type Error struct {
 }
 
 func (e *Error) Error() string {
-	if e.Operation == "" {
-		return fmt.Sprintf("%s: %s", e.Code, e.Message)
-	}
-	return fmt.Sprintf("%s (%s): %s", e.Code, e.Operation, e.Message)
+	return e.Message
 }
 func (e *Error) Unwrap() error { return e.Cause }
 func New(code string, class Class, operation, message string, cause error) *Error {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cocoyes/zhizhi-agent-runtime/contract"
@@ -85,6 +86,27 @@ type Tool interface {
 	Call(context.Context, json.RawMessage) (Result, error)
 }
 
+// StreamEvent is one item produced by a streaming tool. Delta is suitable for
+// immediate delivery to a caller; Result, when non-nil, is the authoritative
+// final result and must be the last item in the stream.
+type StreamEvent struct {
+	Delta  any
+	Result *Result
+}
+
+// ToolStream is intentionally pull based so cancellation and backpressure are
+// inherited from the caller's context.
+type ToolStream interface {
+	Recv(context.Context) (StreamEvent, error)
+	Close() error
+}
+
+// StreamableTool is optional. Ordinary Tool implementations remain valid.
+type StreamableTool interface {
+	Tool
+	Stream(context.Context, json.RawMessage) (ToolStream, error)
+}
+
 type FuncOption func(*Spec)
 
 func WithCapabilities(values ...string) FuncOption {
@@ -116,9 +138,15 @@ func Func[I any, O any](name, description string, fn func(context.Context, I) (O
 	// they can fail with a clear adapter error if sent to a model.
 	r := &jsonschema.Reflector{DoNotReference: true}
 	in := r.Reflect(new(I))
-	input, _ := json.Marshal(in)
+	input, inputErr := json.Marshal(in)
 	out := r.Reflect(new(O))
-	output, _ := json.Marshal(out)
+	output, outputErr := json.Marshal(out)
+	if inputErr != nil {
+		input = json.RawMessage(`[`)
+	}
+	if outputErr != nil {
+		output = json.RawMessage(`[`)
+	}
 	s := Spec{ID: name, Description: description, InputSchema: input, SideEffect: SideEffectRead, Idempotency: IdempotencySafe, Retryable: true, RiskLevel: RiskLow, Confirmation: ConfirmationNever, TrustLevel: "trusted"}
 	for _, option := range options {
 		option(&s)
@@ -139,6 +167,12 @@ func (s Spec) Validate() error {
 	}
 	if s.Description == "" {
 		return fmt.Errorf("tool %s: description is required", s.ID)
+	}
+	if len(s.InputSchema) > 0 && !json.Valid(s.InputSchema) {
+		return fmt.Errorf("tool %s: input schema is invalid JSON", s.ID)
+	}
+	if len(s.OutputSchema) > 0 && !json.Valid(s.OutputSchema) {
+		return fmt.Errorf("tool %s: output schema is invalid JSON", s.ID)
 	}
 	if s.IsWrite() && s.Idempotency == IdempotencyUnknown {
 		return fmt.Errorf("tool %s: write idempotency must be declared", s.ID)
@@ -167,7 +201,10 @@ func (t *funcTool[I, O]) Call(ctx context.Context, raw json.RawMessage) (Result,
 	if err != nil {
 		return Result{}, err
 	}
-	encodedOutput, _ := json.Marshal(v)
+	encodedOutput, err := json.Marshal(v)
+	if err != nil {
+		return Result{}, fmt.Errorf("tool %s: encode output: %w", t.spec.ID, err)
+	}
 	var genericOutput any
 	_ = json.Unmarshal(encodedOutput, &genericOutput)
 	if err := ValidateValue(t.spec.ID, t.outputSchema, genericOutput); err != nil {
@@ -211,10 +248,14 @@ func ValidateValue(id string, schemaJSON json.RawMessage, value any) error {
 	return nil
 }
 
-type Registry struct{ tools map[string]Tool }
+type Registry struct {
+	mu         sync.RWMutex
+	tools      map[string]Tool
+	duplicates map[string]struct{}
+}
 
 func NewRegistry(values ...Tool) *Registry {
-	r := &Registry{tools: make(map[string]Tool)}
+	r := &Registry{tools: make(map[string]Tool), duplicates: make(map[string]struct{})}
 	for _, v := range values {
 		r.Add(v)
 	}
@@ -222,10 +263,22 @@ func NewRegistry(values ...Tool) *Registry {
 }
 func (r *Registry) Add(v Tool) {
 	if v != nil {
-		r.tools[v.Spec().ID] = v
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		id := v.Spec().ID
+		if _, ok := r.tools[id]; ok {
+			r.duplicates[id] = struct{}{}
+			return
+		}
+		r.tools[id] = v
 	}
 }
 func (r *Registry) Validate() error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for id := range r.duplicates {
+		return fmt.Errorf("tool: duplicate id %q", id)
+	}
 	for id, value := range r.tools {
 		if err := value.Spec().Validate(); err != nil {
 			return fmt.Errorf("tool %s: %w", id, err)
@@ -233,13 +286,24 @@ func (r *Registry) Validate() error {
 	}
 	return nil
 }
-func (r *Registry) Get(id string) (Tool, bool) { v, ok := r.tools[id]; return v, ok }
+func (r *Registry) Get(id string) (Tool, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	v, ok := r.tools[id]
+	return v, ok
+}
 func (r *Registry) ResolveCapability(capability string) []Tool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	ids := make([]string, 0)
 	for id, value := range r.tools {
 		wireID := normalizeToolName(id)
+		if id == capability || wireID == capability {
+			ids = append(ids, id)
+			continue
+		}
 		for _, candidate := range value.Spec().Capabilities {
-			if candidate == capability || wireID == capability {
+			if candidate == capability {
 				ids = append(ids, id)
 				break
 			}
@@ -268,6 +332,8 @@ func normalizeToolName(name string) string {
 	return b.String()
 }
 func (r *Registry) ModelSpecs() []model.ToolSpec {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	ids := make([]string, 0, len(r.tools))
 	for id := range r.tools {
 		ids = append(ids, id)
@@ -276,6 +342,22 @@ func (r *Registry) ModelSpecs() []model.ToolSpec {
 	out := make([]model.ToolSpec, 0, len(r.tools))
 	for _, id := range ids {
 		out = append(out, r.tools[id].ModelSpec())
+	}
+	return out
+}
+
+// Tools returns a deterministic immutable snapshot of registered tools.
+func (r *Registry) Tools() []Tool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ids := make([]string, 0, len(r.tools))
+	for id := range r.tools {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]Tool, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, r.tools[id])
 	}
 	return out
 }

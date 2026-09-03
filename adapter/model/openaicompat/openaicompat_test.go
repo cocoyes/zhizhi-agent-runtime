@@ -170,6 +170,34 @@ func TestGenerateSendsForcedToolChoice(t *testing.T) {
 	}
 }
 
+func TestGenerateSendsMultimodalNamedToolAndJSONSchema(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		messages := request["messages"].([]any)
+		content := messages[0].(map[string]any)["content"].([]any)
+		if len(content) != 2 || content[1].(map[string]any)["type"] != "image_url" {
+			t.Fatalf("multimodal content missing: %#v", request)
+		}
+		choice := request["tool_choice"].(map[string]any)
+		if choice["function"].(map[string]any)["name"] != "vision_analyze" {
+			t.Fatalf("named choice not normalized: %#v", choice)
+		}
+		format := request["response_format"].(map[string]any)
+		if format["type"] != "json_schema" {
+			t.Fatalf("schema format missing: %#v", format)
+		}
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"{}"}}]}`)
+	}))
+	defer srv.Close()
+	input := model.ModelInput{Messages: []model.Message{model.UserMessage(model.TextPart("inspect"), model.ImageURLPart("https://example.test/image.png", "high"))}, Tools: []model.ToolSpec{{Type: "function", Function: model.FunctionSpec{Name: "vision.analyze", Parameters: json.RawMessage(`{"type":"object"}`)}}}, ToolChoice: model.NamedTool("vision.analyze"), ResponseFormat: &model.ResponseFormat{Type: model.ResponseFormatJSONSchema, Name: "result", Schema: json.RawMessage(`{"type":"object"}`), Strict: true}}
+	if _, err := New(Config{BaseURL: srv.URL, Model: "test"}).Generate(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateRejectsNonObjectToolSchemaBeforeHTTP(t *testing.T) {
 	called := false
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))

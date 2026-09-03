@@ -63,9 +63,11 @@ func New(cfg Config) *Client {
 func (c *Client) ID() string { return c.cfg.Model }
 func (c *Client) Capabilities() model.ModelCapabilities {
 	if c.cfg.Capabilities != nil {
-		return *c.cfg.Capabilities
+		value := *c.cfg.Capabilities
+		value.Declared = true
+		return value
 	}
-	return model.ModelCapabilities{ToolCalling: true, ParallelToolCalls: true, Streaming: true, JSONMode: true}
+	return model.ModelCapabilities{Declared: true, ToolCalling: true, ParallelToolCalls: true, Streaming: true, JSONMode: true, JSONSchema: true, Images: true}
 }
 
 type Error struct {
@@ -102,19 +104,34 @@ func statusError(status int, message string) *Error {
 
 type chatRequest struct {
 	Model           string           `json:"model"`
-	Messages        []model.Message  `json:"messages"`
+	Messages        []wireMessage    `json:"messages"`
 	Tools           []model.ToolSpec `json:"tools,omitempty"`
 	Stream          bool             `json:"stream,omitempty"`
 	ResponseFormat  *responseFormat  `json:"response_format,omitempty"`
 	Thinking        *thinkingConfig  `json:"thinking,omitempty"`
 	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
-	ToolChoice      model.ToolChoice `json:"tool_choice,omitempty"`
+	ToolChoice      any              `json:"tool_choice,omitempty"`
+}
+type wireMessage struct {
+	Role             model.Role              `json:"role"`
+	Content          any                     `json:"content,omitempty"`
+	ReasoningContent string                  `json:"reasoning_content,omitempty"`
+	Name             string                  `json:"name,omitempty"`
+	ToolCallID       string                  `json:"tool_call_id,omitempty"`
+	ToolCalls        []model.ToolCallRequest `json:"tool_calls,omitempty"`
 }
 type thinkingConfig struct {
 	Type string `json:"type"`
 }
 type responseFormat struct {
-	Type string `json:"type"`
+	Type       string            `json:"type"`
+	JSONSchema *jsonSchemaFormat `json:"json_schema,omitempty"`
+}
+type jsonSchemaFormat struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Schema      json.RawMessage `json:"schema"`
+	Strict      bool            `json:"strict,omitempty"`
 }
 type chatResponse struct {
 	Choices []struct {
@@ -135,7 +152,11 @@ func (c *Client) endpoint() string {
 	return strings.TrimRight(c.cfg.BaseURL, "/") + "/chat/completions"
 }
 func (c *Client) request(ctx context.Context, input model.ModelInput, stream bool) (*http.Response, error) {
-	request := chatRequest{Model: c.cfg.Model, Messages: input.Messages, Tools: input.Tools, Stream: stream, ReasoningEffort: c.cfg.ReasoningEffort, ToolChoice: input.ToolChoice}
+	messages, err := wireMessages(input.Messages)
+	if err != nil {
+		return nil, err
+	}
+	request := chatRequest{Model: c.cfg.Model, Messages: messages, Tools: input.Tools, Stream: stream, ReasoningEffort: c.cfg.ReasoningEffort, ToolChoice: wireToolChoice(input.ToolChoice)}
 	if c.cfg.Thinking != "" {
 		switch c.cfg.Thinking {
 		case ThinkingEnabled, ThinkingDisabled, ThinkingAuto:
@@ -144,12 +165,38 @@ func (c *Client) request(ctx context.Context, input model.ModelInput, stream boo
 			return nil, fmt.Errorf("model: invalid thinking mode %q", c.cfg.Thinking)
 		}
 	}
-	if input.JSONMode && !stream {
+	if input.ResponseFormat != nil {
+		switch input.ResponseFormat.Type {
+		case model.ResponseFormatText, "":
+		case model.ResponseFormatJSONObject:
+			request.ResponseFormat = &responseFormat{Type: string(model.ResponseFormatJSONObject)}
+		case model.ResponseFormatJSONSchema:
+			request.ResponseFormat = &responseFormat{Type: string(model.ResponseFormatJSONSchema), JSONSchema: &jsonSchemaFormat{Name: input.ResponseFormat.Name, Description: input.ResponseFormat.Description, Schema: input.ResponseFormat.Schema, Strict: input.ResponseFormat.Strict}}
+		default:
+			return nil, fmt.Errorf("model: unsupported response format %q", input.ResponseFormat.Type)
+		}
+	} else if input.JSONMode && !stream {
 		request.ResponseFormat = &responseFormat{Type: "json_object"}
 	}
 	body, err := json.Marshal(request)
 	if err != nil {
 		return nil, err
+	}
+	if len(input.Options) > 0 {
+		var object map[string]any
+		if err := json.Unmarshal(body, &object); err != nil {
+			return nil, err
+		}
+		for key, value := range input.Options {
+			if _, reserved := object[key]; reserved {
+				return nil, fmt.Errorf("model option %q conflicts with a core request field", key)
+			}
+			object[key] = value
+		}
+		body, err = json.Marshal(object)
+		if err != nil {
+			return nil, err
+		}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint(), bytes.NewReader(body))
 	if err != nil {
@@ -177,6 +224,52 @@ func (c *Client) request(ctx context.Context, input model.ModelInput, stream boo
 		return nil, err
 	}
 	return resp, nil
+}
+
+func wireToolChoice(choice model.ToolChoice) any {
+	switch choice.Mode {
+	case "":
+		return nil
+	case model.ToolChoiceModeAuto, model.ToolChoiceModeNone, model.ToolChoiceModeRequired:
+		return string(choice.Mode)
+	case model.ToolChoiceModeNamed:
+		return map[string]any{"type": "function", "function": map[string]string{"name": choice.Name}}
+	default:
+		return string(choice.Mode)
+	}
+}
+
+func wireMessages(messages []model.Message) ([]wireMessage, error) {
+	out := make([]wireMessage, 0, len(messages))
+	for _, message := range messages {
+		wire := wireMessage{Role: message.Role, ReasoningContent: message.ReasoningContent, Name: message.Name, ToolCallID: message.ToolCallID, ToolCalls: message.ToolCalls}
+		if len(message.Parts) == 0 {
+			wire.Content = message.Content
+			out = append(out, wire)
+			continue
+		}
+		if message.Content != "" {
+			return nil, fmt.Errorf("model message: content and parts cannot both be set")
+		}
+		parts := make([]any, 0, len(message.Parts))
+		for _, part := range message.Parts {
+			switch part.Type {
+			case model.ContentText:
+				parts = append(parts, map[string]any{"type": "text", "text": part.Text})
+			case model.ContentImageURL:
+				image := map[string]any{"url": part.URL}
+				if part.Detail != "" {
+					image["detail"] = part.Detail
+				}
+				parts = append(parts, map[string]any{"type": "image_url", "image_url": image})
+			default:
+				return nil, fmt.Errorf("openai-compatible adapter: content type %q is not supported", part.Type)
+			}
+		}
+		wire.Content = parts
+		out = append(out, wire)
+	}
+	return out, nil
 }
 func (c *Client) Generate(ctx context.Context, input model.ModelInput) (*model.ModelOutput, error) {
 	wireInput, toolNames, err := wireModelInput(input)
@@ -214,7 +307,11 @@ func (c *Client) Generate(ctx context.Context, input model.ModelInput) (*model.M
 			text = strings.Join(parts, "")
 		}
 		if text != "" {
-			return &model.ModelOutput{Text: text, Usage: decoded.Usage}, nil
+			out := &model.ModelOutput{Text: text, Usage: decoded.Usage}
+			if err := model.ValidateOutput(input, out); err != nil {
+				return nil, err
+			}
+			return out, nil
 		}
 		return nil, &Error{Code: "MODEL_RESPONSE_INVALID", Class: contract.ErrorRemote, Message: fmt.Sprintf("response has no choices: %s", compactBody(body))}
 	}
@@ -224,7 +321,13 @@ func (c *Client) Generate(ctx context.Context, input model.ModelInput) (*model.M
 			ch.Message.ToolCalls[i].Function.Name = original
 		}
 	}
-	return &model.ModelOutput{Text: ch.Message.Content, ReasoningContent: ch.Message.ReasoningContent, ToolCalls: ch.Message.ToolCalls, FinishReason: model.FinishReason(ch.FinishReason), Usage: decoded.Usage}, nil
+	out := &model.ModelOutput{Text: ch.Message.Content, ReasoningContent: ch.Message.ReasoningContent, ToolCalls: ch.Message.ToolCalls, FinishReason: model.FinishReason(ch.FinishReason), Usage: decoded.Usage}
+	if len(out.ToolCalls) == 0 {
+		if err := model.ValidateOutput(input, out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func compactBody(body []byte) string {
@@ -304,17 +407,17 @@ func (s *stream) Recv(ctx context.Context) (model.StreamEvent, error) {
 				ev.ReasoningDelta = choice.Delta.ReasoningContent
 				ev.FinishReason = model.FinishReason(choice.FinishReason)
 				for _, tc := range choice.Delta.ToolCalls {
-					d := s.calls[tc.Index]
-					d.Index = tc.Index
-					d.ID += tc.ID
-					name := tc.Function.Name
+					accumulated := s.calls[tc.Index]
+					accumulated.Index = tc.Index
+					accumulated.ID += tc.ID
+					accumulated.Name += tc.Function.Name
+					accumulated.Arguments += tc.Function.Arguments
+					s.calls[tc.Index] = accumulated
+					name := accumulated.Name
 					if original, ok := s.toolNames[name]; ok {
 						name = original
 					}
-					d.Name += name
-					d.Arguments += tc.Function.Arguments
-					s.calls[tc.Index] = d
-					ev.ToolCallDeltas = append(ev.ToolCallDeltas, d)
+					ev.ToolCallDeltas = append(ev.ToolCallDeltas, model.ToolCallDelta{Index: tc.Index, ID: accumulated.ID, Name: name, Arguments: tc.Function.Arguments})
 				}
 			}
 			return ev, nil
@@ -365,6 +468,11 @@ func wireModelInput(input model.ModelInput) (model.ModelInput, map[string]string
 					out.Messages[i].ToolCalls[j].Function.Name = wire
 				}
 			}
+		}
+	}
+	if out.ToolChoice.Mode == model.ToolChoiceModeNamed {
+		if wire, ok := originalNames[out.ToolChoice.Name]; ok {
+			out.ToolChoice.Name = wire
 		}
 	}
 	return out, toolNames, nil

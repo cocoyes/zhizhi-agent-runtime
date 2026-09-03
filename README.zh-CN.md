@@ -103,6 +103,33 @@ go run ./examples/00-chat
 {"output_text":"..."}
 ```
 
+## P0 执行契约
+
+消息可通过 `model.UserMessage`、`model.TextPart` 和 `model.ImageURLPart`
+表达有序的文本/图片内容块。模型调用支持 `auto`、`none`、`required`、
+指定工具四种选择模式，以及 `text`、`json_object`、严格 `json_schema`
+响应格式。Adapter 必须声明实际能力，不支持的内容会明确报错，不会静默丢弃。
+
+每次运行可追加或筛选一份不可变工具快照，并设置请求级 Option：
+
+```go
+response, err := agent.Run(ctx, request,
+    zhizhi.WithRunTools(requestTools...),
+    zhizhi.WithRunToolFilter(allowForRequest),
+    zhizhi.WithRunObserver(requestObserver),
+    zhizhi.WithRunMetadata(metadata),
+    zhizhi.WithRunResponseFormat(format),
+)
+```
+
+Agent、Model、Model Stream、Tool、Tool Stream、Planner、Replanner 均支持
+全局和请求级 middleware。`Stream` 在多轮工具调用和 complex 模式中输出稳定的
+run/model/tool/plan/step 生命周期事件。Complex 计划既支持确定性工具步骤，也支持
+带能力 allowlist 与工具预算的有限 Agentic Step。成功、失败和暂停结果均保留截至
+当前的累计 usage 与执行统计。
+可选 OpenTelemetry 集成位于 `adapter/otel`，提供各执行边界的 middleware 与事件
+observer，核心 runtime 不感知 OTel API。
+
 本地运行时请参考 `.env.example` 设置真实的 provider 地址、API Key 和模型。运行时不会伪造模型结果：规划、工具选择、重规划和最终回复都会调用你配置的真实模型。
 
 ## 注册工具
@@ -191,6 +218,18 @@ agent, err := zhizhi.New(
 
 没有确认时，副作用工具不会执行，响应会返回 `CONFIRMATION_REQUIRED` 的 `ActionReceipt`。外部系统结果不明确时会显式标记，不能当作成功处理。
 
+### 暂停与恢复
+
+Agent 默认使用进程内 checkpoint store；生产环境可通过
+`WithCheckpointStore` 注入持久化实现。确认请求返回 `Suspended` 和
+`Checkpoint` 后，调用 `agent.Resume(ctx, zhizhi.ResumeRequest{RunID:
+resp.RunID, Checkpoint: resp.Checkpoint, Decision: true}, runOptions...)` 即可从原状态继续；
+若原运行使用请求级动态工具，恢复时需传入同一组工具 Option。
+
+Checkpoint 带版本和工具目录指纹。恢复时已完成步骤与成功写入 receipt
+只回放结果、不重复调用工具；`UNKNOWN` receipt 禁止自动重试；旧 checkpoint
+即使在恢复后再次暂停也会失效，避免旧确认令牌重放写操作。
+
 ## 可靠性控制
 
 ```go
@@ -217,6 +256,8 @@ agent, err := zhizhi.New(
     zhizhi.WithMCP(runtimemcp.Config{
         ID: "internal-tools", Transport: runtimemcp.TransportStreamableHTTP,
         Endpoint: "https://tools.example.com/mcp",
+        ConnectionStrategy: runtimemcp.ConnectionLazy,
+        Required: false,
         AllowTools: []string{"customer.lookup", "ticket.search"},
         DenyTools: []string{"admin.delete"},
     }),
@@ -224,7 +265,10 @@ agent, err := zhizhi.New(
 observer := observe.NewJSONL(os.Stdout)
 ```
 
-MCP 工具属于不可信边界，详见 [SECURITY.md](SECURITY.md)。响应提供 `Evidence`、`Actions`、`Warnings` 和完整运行统计。
+MCP 默认懒连接，并发首次访问只建立一个 session；可选服务故障不会阻止
+Agent 创建，`Required` 服务不可用时则明确失败。Provider 支持目录刷新、
+版本/指纹、重连退避、取消和有界关闭。MCP 工具属于不可信边界，详见
+[SECURITY.md](SECURITY.md)。响应提供 `Evidence`、`Actions`、`Warnings` 和完整运行统计。
 
 ## 示例目录
 
@@ -241,6 +285,7 @@ MCP 工具属于不可信边界，详见 [SECURITY.md](SECURITY.md)。响应提�
 | `08-observability` | JSONL 追踪 | `go run ./examples/08-observability` |
 | `09-config-agent` | YAML 配置 | `go run ./examples/09-config-agent` |
 | `10-full-agent` | 条件、绑定、replan 和组合 | `go run ./examples/10-full-agent` |
+| `11-household-workflow` | 真实模型驱动的并行、条件绑定与故障重规划 | `go run ./examples/11-household-workflow` |
 
 ## 开发与验证
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/cocoyes/zhizhi-agent-runtime/contract"
@@ -68,6 +69,37 @@ func TestConnectDiscoversAndCallsFixture(t *testing.T) {
 	}
 	if result.Action == nil || result.Action.Status != contract.ActionUnknown {
 		t.Fatalf("remote side-effect receipt missing: %+v", result.Action)
+	}
+}
+
+func TestConcurrentEnsureCreatesOneCatalogGeneration(t *testing.T) {
+	server := sdk.NewServer(&sdk.Implementation{Name: "fixture", Version: "1"}, nil)
+	sdk.AddTool(server, &sdk.Tool{Name: "ping", Description: "ping", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *sdk.CallToolRequest, struct{}) (*sdk.CallToolResult, any, error) {
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "pong"}}}, nil, nil
+	})
+	httpServer := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return server }, nil))
+	defer httpServer.Close()
+	provider, err := NewProvider(Config{ID: "fixture", Endpoint: httpServer.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close()
+	var wg sync.WaitGroup
+	errs := make(chan error, 32)
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); errs <- provider.Ensure(context.Background()) }()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	catalog := provider.Catalog()
+	if catalog.Version != 1 || len(catalog.Tools) != 1 {
+		t.Fatalf("expected one connection generation, got %+v", catalog)
 	}
 }
 

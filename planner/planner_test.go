@@ -47,6 +47,37 @@ func TestModelPlannerUsesForcedTypedOutputToolLikeEino(t *testing.T) {
 		t.Fatalf("invalid output tool schema: %v err=%v", schema, err)
 	}
 }
+
+type wrappedPlanScripted struct{ calls int }
+
+func (s *wrappedPlanScripted) ID() string { return "wrapped-plan-scripted" }
+func (s *wrappedPlanScripted) Capabilities() model.ModelCapabilities {
+	return model.ModelCapabilities{JSONMode: true}
+}
+func (s *wrappedPlanScripted) Generate(context.Context, model.ModelInput) (*model.ModelOutput, error) {
+	s.calls++
+	if s.calls == 1 {
+		return &model.ModelOutput{Text: `{"plan":{"version":1,"steps":[{"id":"weather","capability":"weather.current"}]}}`}, nil
+	}
+	return &model.ModelOutput{Text: `{"version":1,"steps":[{"id":"weather","capability":"weather.current"}]}`}, nil
+}
+func (s *wrappedPlanScripted) Stream(context.Context, model.ModelInput) (model.Stream, error) {
+	return nil, nil
+}
+
+func TestModelPlannerRepairsUnexpectedPlanWrapper(t *testing.T) {
+	m := &wrappedPlanScripted{}
+	p, err := NewModelPlanner(m).Plan(context.Background(), "weather", nil)
+	if err != nil || m.calls != 2 || len(p.Steps) != 1 {
+		t.Fatalf("expected wrapped plan to be repaired: plan=%+v calls=%d err=%v", p, m.calls, err)
+	}
+}
+
+func TestDecodePlanRejectsEmptyInitialPlan(t *testing.T) {
+	if _, err := decodePlan(`{"version":1,"steps":[]}`, nil); err == nil {
+		t.Fatal("expected empty initial plan to be rejected")
+	}
+}
 func (scripted) Generate(context.Context, model.ModelInput) (*model.ModelOutput, error) {
 	return &model.ModelOutput{Text: `{"version":1,"steps":[{"id":"weather","capability":"weather.current","input":{"city":"Shenzhen"}}]}`}, nil
 }

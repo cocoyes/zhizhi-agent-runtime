@@ -20,7 +20,10 @@ type Evidence struct {
 
 func WrapUntrusted(data any) Evidence { return Evidence{Trust: Untrusted, Data: data} }
 func PromptData(data any) string {
-	b, _ := json.Marshal(data)
+	b, err := json.Marshal(data)
+	if err != nil {
+		return "<untrusted-evidence encoding_error=\"true\"></untrusted-evidence>"
+	}
 	return "<untrusted-evidence>\n" + string(b) + "\n</untrusted-evidence>"
 }
 func ValidateToolText(text string) error {

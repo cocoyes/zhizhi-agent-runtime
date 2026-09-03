@@ -44,13 +44,19 @@ type FileMCPConfig struct {
 	Servers []FileMCPServer `yaml:"servers"`
 }
 type FileMCPServer struct {
-	ID           string                           `yaml:"id"`
-	Transport    string                           `yaml:"transport"`
-	Endpoint     string                           `yaml:"endpoint"`
-	AllowTools   []string                         `yaml:"allow_tools"`
-	DenyTools    []string                         `yaml:"deny_tools"`
-	ToolPolicies map[string]runtimemcp.ToolPolicy `yaml:"tool_policies"`
-	Headers      map[string]string                `yaml:"headers"`
+	ID                 string                           `yaml:"id"`
+	Transport          string                           `yaml:"transport"`
+	Endpoint           string                           `yaml:"endpoint"`
+	AllowTools         []string                         `yaml:"allow_tools"`
+	DenyTools          []string                         `yaml:"deny_tools"`
+	ToolPolicies       map[string]runtimemcp.ToolPolicy `yaml:"tool_policies"`
+	Headers            map[string]string                `yaml:"headers"`
+	ConnectionStrategy runtimemcp.ConnectionStrategy    `yaml:"connection_strategy"`
+	Required           bool                             `yaml:"required"`
+	ConnectTimeout     time.Duration                    `yaml:"connect_timeout"`
+	CloseTimeout       time.Duration                    `yaml:"close_timeout"`
+	MaxConnectAttempts int                              `yaml:"max_connect_attempts"`
+	ReconnectBackoff   time.Duration                    `yaml:"reconnect_backoff"`
 }
 
 func Load(path string) (Agent, error) {
@@ -75,7 +81,7 @@ func Load(path string) (Agent, error) {
 		if transport != runtimemcp.TransportStreamableHTTP {
 			return nil, fmt.Errorf("config: unsupported MCP transport %q", transport)
 		}
-		options = append(options, WithMCP(runtimemcp.Config{ID: server.ID, Transport: transport, Endpoint: server.Endpoint, AllowTools: server.AllowTools, DenyTools: server.DenyTools, ToolPolicies: server.ToolPolicies, Headers: server.Headers}))
+		options = append(options, WithMCP(runtimemcp.Config{ID: server.ID, Transport: transport, Endpoint: server.Endpoint, AllowTools: server.AllowTools, DenyTools: server.DenyTools, ToolPolicies: server.ToolPolicies, Headers: server.Headers, ConnectionStrategy: server.ConnectionStrategy, Required: server.Required, ConnectTimeout: server.ConnectTimeout, CloseTimeout: server.CloseTimeout, MaxConnectAttempts: server.MaxConnectAttempts, ReconnectBackoff: server.ReconnectBackoff}))
 	}
 	return New(options...)
 }

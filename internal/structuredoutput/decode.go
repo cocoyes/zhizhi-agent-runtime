@@ -58,29 +58,42 @@ func Candidate(output *model.ModelOutput, toolName string, requireTool bool) (st
 }
 
 // Decode extracts and repairs JSON from text. It first lets jsonrepair perform
-// its target-shape normalization, then falls back to mapstructure's weak typed
-// decoding for common scalar drift such as "1" in an integer field.
+// target-shape normalization, then falls back to weak typed decoding.
 func Decode(text string, result any) error {
 	directErr := jsonrepair.UnmarshalJSONFromText(text, result)
 	if directErr == nil {
 		return nil
 	}
+	return decodeMapStructure(text, result, false, directErr)
+}
 
+// DecodeStrict rejects unknown fields while retaining JSON repair and weak
+// scalar conversion. Use it at boundaries where accepting a wrapper as a
+// zero-value object could turn malformed output into a successful no-op.
+func DecodeStrict(text string, result any) error {
+	return decodeMapStructure(text, result, true, nil)
+}
+
+func decodeMapStructure(text string, result any, errorUnused bool, directErr error) error {
 	var generic any
 	if err := jsonrepair.UnmarshalJSONFromText(text, &generic); err != nil {
-		return fmt.Errorf("repair JSON: %w", directErr)
+		return fmt.Errorf("repair JSON: %w", err)
 	}
 	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
 		Result:           result,
 		TagName:          "json",
 		WeaklyTypedInput: true,
 		ZeroFields:       true,
+		ErrorUnused:      errorUnused,
 	})
 	if err != nil {
 		return fmt.Errorf("configure typed decoder: %w", err)
 	}
 	if err := decoder.Decode(generic); err != nil {
-		return fmt.Errorf("decode repaired JSON: %w (direct decode: %v)", err, directErr)
+		if directErr != nil {
+			return fmt.Errorf("decode repaired JSON: %w (direct decode: %v)", err, directErr)
+		}
+		return fmt.Errorf("decode repaired JSON: %w", err)
 	}
 	return nil
 }

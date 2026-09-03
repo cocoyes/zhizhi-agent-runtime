@@ -25,3 +25,12 @@ func TestDecodeUsesJSONTags(t *testing.T) {
 		t.Fatalf("unexpected output: %+v", output)
 	}
 }
+
+func TestDecodeRejectsUnknownWrapper(t *testing.T) {
+	var output struct {
+		Version int `json:"version"`
+	}
+	if err := DecodeStrict(`{"plan":{"version":1}}`, &output); err == nil {
+		t.Fatal("expected an unknown wrapper field to be rejected")
+	}
+}

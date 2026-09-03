@@ -8,17 +8,24 @@ import (
 )
 
 type Step struct {
-	ID          string
-	Kind        plan.StepKind
-	Importance  plan.StepImportance
-	Title       string
-	Description string
-	Capability  string
-	DependsOn   []string
-	Optional    bool
-	Input       map[string]any
-	Bindings    []plan.InputBinding
-	Condition   *plan.Condition
+	ID              string
+	Kind            plan.StepKind
+	Importance      plan.StepImportance
+	Title           string
+	Description     string
+	Capability      string
+	DependsOn       []string
+	Optional        bool
+	Input           map[string]any
+	Bindings        []plan.InputBinding
+	Condition       *plan.Condition
+	Mode            plan.StepMode
+	Goal            string
+	SuccessCriteria string
+	Capabilities    []string
+	ToolBudget      plan.ToolCallBudget
+	ApprovedToolID  string
+	ApprovedInput   []byte
 }
 type Batch struct {
 	Index int
@@ -48,7 +55,11 @@ func Compile(p plan.Plan) (ExecutionPlan, error) {
 		if importance == "" {
 			importance = plan.ImportanceRequired
 		}
-		steps[item.ID] = Step{ID: item.ID, Kind: item.Kind, Importance: importance, Title: item.Title, Description: item.Description, Capability: item.Capability, DependsOn: append([]string(nil), item.DependsOn...), Optional: item.Optional || importance == plan.ImportanceOptional, Input: item.Input, Bindings: append([]plan.InputBinding(nil), item.Bindings...), Condition: item.Condition}
+		mode := item.Mode
+		if mode == "" {
+			mode = plan.StepModeTool
+		}
+		steps[item.ID] = Step{ID: item.ID, Kind: item.Kind, Importance: importance, Title: item.Title, Description: item.Description, Capability: item.Capability, DependsOn: append([]string(nil), item.DependsOn...), Optional: item.Optional || importance == plan.ImportanceOptional, Input: item.Input, Bindings: append([]plan.InputBinding(nil), item.Bindings...), Condition: item.Condition, Mode: mode, Goal: item.Goal, SuccessCriteria: item.SuccessCriteria, Capabilities: append([]string(nil), item.Capabilities...), ToolBudget: item.ToolBudget}
 		indegree[item.ID] = len(item.DependsOn)
 		for _, dep := range item.DependsOn {
 			dependents[dep] = append(dependents[dep], item.ID)

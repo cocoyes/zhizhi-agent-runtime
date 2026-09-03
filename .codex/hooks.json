@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"E:/code/zhizhi/zhizhi-agent-runtime/.agents/skills/comet/scripts/comet-hook-router.mjs\" --platform \"codex\" --project-root \"E:/code/zhizhi/zhizhi-agent-runtime\""
+          }
+        ]
+      }
+    ]
+  }
+}

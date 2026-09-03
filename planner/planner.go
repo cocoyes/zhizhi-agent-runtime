@@ -32,7 +32,7 @@ func (p *ModelPlanner) Plan(ctx context.Context, input string, tools []model.Too
 	}
 	system := p.Prompt
 	if system == "" {
-		system = "你是 Agent 的规划组件。理解用户目标，只选择真正有帮助的工具，并把它们编排成依赖安全的执行图。需要根据前置结果做不同处理时，使用条件步骤；避免无关步骤和重复工作。只返回可执行的 JSON，格式为 {version,steps}；每个步骤包含 id、capability、depends_on，可选 input、bindings、condition。引用前置结果必须使用 bindings，source_path 必须来自对应工具的 output_schema，target_path 必须来自当前工具的 input_schema；不要把 step.path 引用写进 input 字符串。condition 包含 source_step、source_path、equals，且 source_step 必须同时出现在 depends_on 中。"
+		system = "你是 Agent 的规划组件。理解用户目标，只选择真正有帮助的工具，并把它们编排成依赖安全的执行图。需要根据前置结果做不同处理时，使用条件步骤；避免无关步骤和重复工作。只返回可执行的 JSON，格式为 {version,steps}；每个步骤包含 id、capability、depends_on，可选 input、bindings、condition。每个工具 input_schema 中的必填字段都必须由静态 input 或 bindings 提供。引用前置结果必须使用 bindings，source_path 必须来自对应工具的 output_schema，target_path 必须来自当前工具的 input_schema；不要把 step.path 引用写进 input 字符串。condition 包含 source_step、source_path，并且必须在 equals 或 not_equals 中选择一个；比较值必须严格使用 source output_schema 定义的原始值，不能改写成自然语言。source_step 必须同时出现在 depends_on 中。用户表达“否则”时，为互斥分支分别使用 equals 和 not_equals。不要预先添加仅在某一步执行失败后才使用的 fallback 步骤；运行时重规划器会在真实故障后选择替代能力。"
 	}
 	catalog, err := json.Marshal(model.PlanningToolCatalog(tools))
 	if err != nil {
@@ -53,6 +53,9 @@ func (p *ModelPlanner) Plan(ctx context.Context, input string, tools []model.Too
 	if err != nil {
 		return plan.Plan{}, fmt.Errorf("planner model: %w", err)
 	}
+	if out == nil {
+		return plan.Plan{}, fmt.Errorf("planner model returned nil output")
+	}
 	p.trace("model.completed", map[string]any{"content": out.Text, "reasoning_content": out.ReasoningContent, "tool_call_requests": out.ToolCalls})
 	candidate, candidateErr := structuredoutput.Candidate(out, planOutputToolName, useToolOutput)
 	for repairAttempt := 0; ; repairAttempt++ {
@@ -69,10 +72,13 @@ func (p *ModelPlanner) Plan(ctx context.Context, input string, tools []model.Too
 		}
 		repairRequest := user + "\nInvalid candidate:\n" + candidate + "\nValidation error:\n" + decodeErr.Error()
 		p.trace("repair.request", map[string]any{"content": repairRequest})
-		repairMessages := []model.Message{{Role: model.RoleSystem, Content: "Produce the required plan tool call again after correcting the validation error. Preserve intent. All steps need non-empty id and capability fields, and dependencies must form an acyclic graph. Never put {{step.path}} templates in input; represent every dependency value with a bindings entry."}, {Role: model.RoleUser, Content: repairRequest}}
+		repairMessages := []model.Message{{Role: model.RoleSystem, Content: "Produce the required plan tool call again after correcting the validation error. Preserve intent. All steps need non-empty id and capability fields, dependencies must form an acyclic graph, and every required tool input must be covered by static input or bindings. Never put {{step.path}} templates in input; represent every dependency value with a bindings entry. Do not pre-plan failure-only fallback steps; runtime replanning handles actual failures."}, {Role: model.RoleUser, Content: repairRequest}}
 		repair, repairErr := p.Model.Generate(ctx, structuredModelInput(repairMessages, outputTool, useToolOutput))
 		if repairErr != nil {
 			return plan.Plan{}, fmt.Errorf("planner: invalid structured output: %w", decodeErr)
+		}
+		if repair == nil {
+			return plan.Plan{}, fmt.Errorf("planner repair model returned nil output")
 		}
 		p.trace("repair.completed", map[string]any{"content": repair.Text, "reasoning_content": repair.ReasoningContent, "tool_call_requests": repair.ToolCalls})
 		candidate, candidateErr = structuredoutput.Candidate(repair, planOutputToolName, useToolOutput)
@@ -94,7 +100,7 @@ func (p *ModelPlanner) trace(event string, details map[string]any) {
 
 func decodePlan(text string, tools []model.ToolSpec) (plan.Plan, error) {
 	var result plan.Plan
-	if err := structuredoutput.Decode(text, &result); err != nil {
+	if err := structuredoutput.DecodeStrict(text, &result); err != nil {
 		return plan.Plan{}, err
 	}
 	if result.Version == 0 {
@@ -102,6 +108,12 @@ func decodePlan(text string, tools []model.ToolSpec) (plan.Plan, error) {
 	}
 	normalized, err := result.Normalize()
 	if err != nil {
+		return plan.Plan{}, fmt.Errorf("invalid plan: %w", err)
+	}
+	if len(normalized.Steps) == 0 {
+		return plan.Plan{}, fmt.Errorf("invalid plan: initial plan must contain at least one executable step")
+	}
+	if err := plan.ValidateAgainstTools(normalized, tools); err != nil {
 		return plan.Plan{}, fmt.Errorf("invalid plan: %w", err)
 	}
 	for _, step := range normalized.Steps {

@@ -125,6 +125,36 @@ Responses-style text is also accepted:
 {"output_text":"..."}
 ```
 
+## P0 execution contract
+
+Messages support ordered text and image parts through `model.UserMessage`,
+`model.TextPart`, and `model.ImageURLPart`. Model inputs support `auto`, `none`,
+`required`, and named tool choice plus `text`, `json_object`, and strict
+`json_schema` response formats. Adapters declare their capabilities and reject
+unsupported content instead of silently dropping it.
+
+Each run can add or filter an immutable tool snapshot and attach scoped options:
+
+```go
+response, err := agent.Run(ctx, request,
+    zhizhi.WithRunTools(requestTools...),
+    zhizhi.WithRunToolFilter(allowForRequest),
+    zhizhi.WithRunObserver(requestObserver),
+    zhizhi.WithRunMetadata(metadata),
+    zhizhi.WithRunResponseFormat(format),
+)
+```
+
+Global and run-scoped middleware are available for agent, model, model stream,
+tool, tool stream, planner, and replanner boundaries. `Stream` emits stable
+run/model/tool/plan/step lifecycle events across every tool round and complex
+mode. Complex plans may use deterministic tool steps or bounded agentic steps
+with an explicit capability allowlist and tool-call budget. Final and suspended
+responses contain cumulative model/tool usage and execution statistics.
+Optional OpenTelemetry integration lives in `adapter/otel`; its instrumentation
+provides middleware for each execution boundary plus an event observer, keeping
+the core runtime independent of OTel APIs.
+
 For local setup, copy `.env.example` to your shell environment and set a real
 provider endpoint, API key, and model. The runtime never fabricates model
 responses: planning, tool selection, replanning, and final composition all use
@@ -218,6 +248,34 @@ agent, err := zhizhi.New(
 
 Without confirmation, the side effect is not executed. The response contains an `ActionReceipt` with `CONFIRMATION_REQUIRED`. Unknown external outcomes are represented explicitly and must not be treated as success.
 
+### Suspend and resume
+
+Every agent has a process-local checkpoint store by default. Inject a durable
+store in production and resume the exact suspended state after approval:
+
+```go
+agent, err := zhizhi.New(
+    zhizhi.WithModel(model),
+    zhizhi.WithTools(sendEmail),
+    zhizhi.WithCheckpointStore(durableStore),
+)
+
+pending, err := agent.Run(ctx, request)
+if pending.Suspended {
+    completed, err := agent.Resume(ctx, zhizhi.ResumeRequest{
+        RunID: pending.RunID, Checkpoint: pending.Checkpoint, Decision: true,
+    }, runOptions...) // provide the same request-scoped tools, if any
+    _ = completed
+    _ = err
+}
+```
+
+Checkpoints are versioned and bound to the tool-catalog fingerprint. Completed
+steps and successful write receipts are replayed without executing their tools;
+`UNKNOWN` receipts are never retried. A resumed checkpoint is invalidated even
+when execution suspends again, preventing stale approval tokens from replaying a
+write.
+
 ## Reliability Controls
 
 ```go
@@ -240,13 +298,21 @@ agent, err := zhizhi.New(
     zhizhi.WithMCP(runtimemcp.Config{
         ID: "internal-tools", Transport: runtimemcp.TransportStreamableHTTP,
         Endpoint: "https://tools.example.com/mcp",
+        ConnectionStrategy: runtimemcp.ConnectionLazy,
+        Required: false,
+		MaxConnectAttempts: 3,
+		ReconnectBackoff: 200 * time.Millisecond,
         AllowTools: []string{"customer.lookup", "ticket.search"},
         DenyTools: []string{"admin.delete"},
     }),
 )
 ```
 
-MCP tools are treated as an untrusted boundary. See [SECURITY.md](SECURITY.md).
+Lazy connection is the default. Concurrent first use is single-flight; optional
+servers are isolated from agent creation, while `Required` servers fail the run
+if unavailable. Providers support catalog refresh, fingerprint/version drift,
+bounded reconnect backoff, cancellation, and context-bounded close. MCP tools
+are treated as an untrusted boundary. See [SECURITY.md](SECURITY.md).
 
 ## Observability
 
@@ -277,6 +343,7 @@ Responses expose `Evidence`, `Actions`, `Warnings`, and statistics for model cal
 | `08-observability` | JSONL traces | `go run ./examples/08-observability` |
 | `09-config-agent` | YAML configuration | `go run ./examples/09-config-agent` |
 | `10-full-agent` | Conditions, bindings, replan, composition | `go run ./examples/10-full-agent` |
+| `11-household-workflow` | Real-model parallel steps, conditional bindings, and failure replanning | `go run ./examples/11-household-workflow` |
 
 ## Development
 

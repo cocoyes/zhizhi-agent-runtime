@@ -7,8 +7,11 @@ import (
 	"io"
 	"testing"
 
+	"github.com/cocoyes/zhizhi-agent-runtime/checkpoint"
 	"github.com/cocoyes/zhizhi-agent-runtime/contract"
+	"github.com/cocoyes/zhizhi-agent-runtime/middleware"
 	"github.com/cocoyes/zhizhi-agent-runtime/model"
+	"github.com/cocoyes/zhizhi-agent-runtime/runtimeerr"
 	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
@@ -145,6 +148,79 @@ func TestRunRequiresConfirmationBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestSuspendAndResumeDoesNotRepeatApprovedWork(t *testing.T) {
+	called := 0
+	write := tool.Func("write", "write", func(context.Context, struct{}) (string, error) { called++; return "done", nil }, tool.WithSideEffect(tool.SideEffectWrite), tool.WithIdempotency(tool.IdempotencyIdempotent), tool.WithConfirmation(tool.ConfirmationAlways))
+	store := checkpoint.NewMemoryStore()
+	a, err := New(WithModel(&writeModel{}), WithTools(write), WithCheckpointStore(store))
+	if err != nil {
+		t.Fatal(err)
+	}
+	suspended, err := a.Run(context.Background(), Request{Input: "write"})
+	if err != nil || !suspended.Suspended || suspended.Checkpoint == "" || called != 0 {
+		t.Fatalf("unexpected suspension: %+v called=%d err=%v", suspended, called, err)
+	}
+	resumed, err := a.Resume(context.Background(), ResumeRequest{RunID: suspended.RunID, Checkpoint: suspended.Checkpoint, Decision: true})
+	if err != nil || resumed.Suspended || resumed.Text != "done" || called != 1 {
+		t.Fatalf("unexpected resume: %+v called=%d err=%v", resumed, called, err)
+	}
+	if _, err := store.Load(context.Background(), suspended.Checkpoint); !errors.Is(err, checkpoint.ErrNotFound) {
+		t.Fatalf("completed checkpoint was not deleted: %v", err)
+	}
+}
+
+type twoWriteModel struct{ calls int }
+
+func (m *twoWriteModel) ID() string { return "two-write" }
+func (m *twoWriteModel) Capabilities() model.ModelCapabilities {
+	return model.ModelCapabilities{ToolCalling: true}
+}
+func (m *twoWriteModel) Generate(context.Context, model.ModelInput) (*model.ModelOutput, error) {
+	m.calls++
+	if m.calls == 1 {
+		return &model.ModelOutput{ToolCalls: []model.ToolCallRequest{toolCall("one", "write.one"), toolCall("two", "write.two")}}, nil
+	}
+	return &model.ModelOutput{Text: "done"}, nil
+}
+func (m *twoWriteModel) Stream(context.Context, model.ModelInput) (model.Stream, error) {
+	return nil, nil
+}
+func toolCall(id, name string) model.ToolCallRequest {
+	var call model.ToolCallRequest
+	call.ID = id
+	call.Type = "function"
+	call.Function.Name = name
+	call.Function.Arguments = `{}`
+	return call
+}
+
+func TestResumeInvalidatesPriorCheckpointOnSecondSuspend(t *testing.T) {
+	first, second := 0, 0
+	one := tool.Func("write.one", "one", func(context.Context, struct{}) (string, error) { first++; return "one", nil }, tool.WithSideEffect(tool.SideEffectWrite), tool.WithIdempotency(tool.IdempotencyIdempotent), tool.WithConfirmation(tool.ConfirmationAlways))
+	two := tool.Func("write.two", "two", func(context.Context, struct{}) (string, error) { second++; return "two", nil }, tool.WithSideEffect(tool.SideEffectWrite), tool.WithIdempotency(tool.IdempotencyIdempotent), tool.WithConfirmation(tool.ConfirmationAlways))
+	store := checkpoint.NewMemoryStore()
+	a, err := New(WithModel(&twoWriteModel{}), WithTools(one, two), WithCheckpointStore(store))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mode := RunModeAgentSimple
+	original, err := a.Run(context.Background(), Request{Input: "write", Mode: &mode})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := a.Resume(context.Background(), ResumeRequest{Checkpoint: original.Checkpoint, Decision: true})
+	if err != nil || !next.Suspended || first != 1 || second != 0 {
+		t.Fatalf("unexpected second suspension: %+v first=%d second=%d err=%v", next, first, second, err)
+	}
+	if _, err := a.Resume(context.Background(), ResumeRequest{Checkpoint: original.Checkpoint, Decision: true}); !errors.Is(err, checkpoint.ErrNotFound) {
+		t.Fatalf("stale checkpoint remained replayable: %v", err)
+	}
+	final, err := a.Resume(context.Background(), ResumeRequest{Checkpoint: next.Checkpoint, Decision: true})
+	if err != nil || final.Text != "done" || first != 1 || second != 1 {
+		t.Fatalf("unexpected completion: %+v first=%d second=%d err=%v", final, first, second, err)
+	}
+}
+
 type streamStub struct{ sent bool }
 
 func (s *streamStub) Recv(context.Context) (model.StreamEvent, error) {
@@ -162,6 +238,16 @@ func (s *streamStub) Recv(context.Context) (model.StreamEvent, error) {
 func (s *streamStub) Close() error { return nil }
 
 type streamModel struct{ calls int }
+type finalTextStream struct{ sent bool }
+
+func (s *finalTextStream) Recv(context.Context) (model.StreamEvent, error) {
+	if s.sent {
+		return model.StreamEvent{}, io.EOF
+	}
+	s.sent = true
+	return model.StreamEvent{TextDelta: "stream final"}, nil
+}
+func (s *finalTextStream) Close() error { return nil }
 
 func (m *streamModel) ID() string { return "stream" }
 func (m *streamModel) Capabilities() model.ModelCapabilities {
@@ -172,7 +258,11 @@ func (m *streamModel) Generate(context.Context, model.ModelInput) (*model.ModelO
 	return &model.ModelOutput{Text: "stream final"}, nil
 }
 func (m *streamModel) Stream(context.Context, model.ModelInput) (model.Stream, error) {
-	return &streamStub{}, nil
+	m.calls++
+	if m.calls == 1 {
+		return &streamStub{}, nil
+	}
+	return &finalTextStream{}, nil
 }
 func TestAgentStreamCompletesToolCall(t *testing.T) {
 	weather := tool.Func("weather.get", "weather", func(context.Context, struct {
@@ -189,11 +279,159 @@ func TestAgentStreamCompletesToolCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := stream.Recv(context.Background()); err != nil {
+	for {
+		event, recvErr := stream.Recv(context.Background())
+		if recvErr != nil {
+			t.Fatal(recvErr)
+		}
+		if event.Response != nil {
+			if event.Response.Text != "stream final" || event.Response.Stats.ModelCalls != 2 {
+				t.Fatalf("unexpected stream completion: %+v", event)
+			}
+			break
+		}
+	}
+}
+
+func TestAgentStreamReportsPartialFailureStats(t *testing.T) {
+	weather := tool.Func("weather.get", "weather", func(context.Context, struct {
+		City string `json:"city"`
+	}) (string, error) {
+		return "", errors.New("provider failed")
+	})
+	a, err := New(WithModel(&streamModel{}), WithTools(weather))
+	if err != nil {
 		t.Fatal(err)
 	}
-	event, err := stream.Recv(context.Background())
-	if err != nil || event.Response == nil || event.Response.Text != "stream final" {
-		t.Fatalf("unexpected stream completion: %+v %v", event, err)
+	stream, err := a.Stream(context.Background(), Request{Input: "weather"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	for {
+		event, recvErr := stream.Recv(context.Background())
+		if recvErr != nil {
+			t.Fatalf("failed before failure event: %v", recvErr)
+		}
+		if event.Type == EventRunFailed {
+			if event.Response == nil || event.Response.Outcome != contract.OutcomeFailed || event.Response.Stats.ToolCalls != 1 || event.Response.Stats.FailedTools != 1 {
+				t.Fatalf("invalid partial failure response: %+v", event.Response)
+			}
+			break
+		}
+	}
+}
+
+type dynamicToolModel struct{}
+
+func (dynamicToolModel) ID() string { return "dynamic" }
+func (dynamicToolModel) Capabilities() model.ModelCapabilities {
+	return model.ModelCapabilities{ToolCalling: true}
+}
+func (dynamicToolModel) Generate(_ context.Context, input model.ModelInput) (*model.ModelOutput, error) {
+	if len(input.Messages) > 0 && input.Messages[len(input.Messages)-1].Role == model.RoleTool {
+		return &model.ModelOutput{Text: "done"}, nil
+	}
+	if len(input.Tools) == 0 {
+		return &model.ModelOutput{Text: "no tools"}, nil
+	}
+	return &model.ModelOutput{ToolCalls: []model.ToolCallRequest{toolCall("dynamic", input.Tools[0].Function.Name)}}, nil
+}
+func (dynamicToolModel) Stream(context.Context, model.ModelInput) (model.Stream, error) {
+	return nil, nil
+}
+
+func TestRunToolsAndMiddlewareAreRequestScoped(t *testing.T) {
+	called, modelWrapped, toolWrapped := 0, 0, 0
+	dynamic := tool.Func("dynamic", "dynamic", func(context.Context, struct{}) (string, error) { called++; return "ok", nil })
+	modelMW := func(next middleware.ModelHandler) middleware.ModelHandler {
+		return func(ctx context.Context, input model.ModelInput) (*model.ModelOutput, error) {
+			modelWrapped++
+			return next(ctx, input)
+		}
+	}
+	toolMW := func(next middleware.ToolHandler) middleware.ToolHandler {
+		return func(ctx context.Context, input middleware.ToolInvocation) (tool.Result, error) {
+			toolWrapped++
+			return next(ctx, input)
+		}
+	}
+	mode := RunModeAgentSimple
+	a, err := New(WithModel(dynamicToolModel{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := a.Run(context.Background(), Request{Input: "use", Mode: &mode}, WithRunTools(dynamic), WithRunModelMiddleware(modelMW), WithRunToolMiddleware(toolMW))
+	if err != nil || first.Text != "done" || called != 1 || modelWrapped != 2 || toolWrapped != 1 {
+		t.Fatalf("unexpected scoped run: %+v counts=%d/%d/%d err=%v", first, called, modelWrapped, toolWrapped, err)
+	}
+	second, err := a.Run(context.Background(), Request{Input: "again", Mode: &mode})
+	if err != nil || second.Text != "no tools" || called != 1 {
+		t.Fatalf("run tool leaked: %+v called=%d err=%v", second, called, err)
+	}
+}
+
+func TestCloseRejectsNewRunsAndDuplicateRunIDs(t *testing.T) {
+	mode := RunModeAgentSimple
+	a, err := New(WithModel(dynamicToolModel{}), WithRunIDGenerator(func() (string, error) { return "same", nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Run(context.Background(), Request{Input: "one", Mode: &mode}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Run(context.Background(), Request{Input: "two", Mode: &mode}); err == nil {
+		t.Fatal("expected duplicate run id rejection")
+	} else {
+		var structured *runtimeerr.Error
+		if !errors.As(err, &structured) {
+			t.Fatalf("expected structured error, got %T", err)
+		}
+	}
+	if err := a.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Run(context.Background(), Request{Input: "three", Mode: &mode}); !errors.Is(err, ErrAgentClosed) {
+		t.Fatal("expected closed agent rejection")
+	}
+}
+
+func TestBudgetErrorsSupportErrorsIs(t *testing.T) {
+	weather := tool.Func("weather.get", "weather", func(context.Context, struct {
+		City string `json:"city"`
+	}) (string, error) {
+		return "sunny", nil
+	})
+	mode := RunModeAgentSimple
+	a, err := New(WithModel(&scriptedModel{}), WithTools(weather), WithBudget(Budget{MaxModelCalls: 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = a.Run(context.Background(), Request{Input: "weather", Mode: &mode})
+	if !errors.Is(err, ErrBudgetExceeded) {
+		t.Fatalf("expected budget sentinel, got %v", err)
+	}
+}
+
+func TestResumeUsesRunScopedToolSnapshot(t *testing.T) {
+	calls := 0
+	dynamicWrite := tool.Func("weather.get", "write", func(context.Context, struct {
+		City string `json:"city"`
+	}) (string, error) {
+		calls++
+		return "done", nil
+	}, tool.WithSideEffect(tool.SideEffectWrite), tool.WithConfirmation(tool.ConfirmationAlways))
+	mode := RunModeAgentSimple
+	a, err := New(WithModel(&scriptedModel{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	suspended, err := a.Run(context.Background(), Request{Input: "write", Mode: &mode}, WithRunTools(dynamicWrite))
+	if err != nil || !suspended.Suspended || calls != 0 {
+		t.Fatalf("unexpected suspension: %+v calls=%d err=%v", suspended, calls, err)
+	}
+	resumed, err := a.Resume(context.Background(), ResumeRequest{RunID: suspended.RunID, Checkpoint: suspended.Checkpoint, Decision: true}, WithRunTools(dynamicWrite))
+	if err != nil || resumed.Suspended || calls != 1 || resumed.Text == "" {
+		t.Fatalf("unexpected dynamic resume: %+v calls=%d err=%v", resumed, calls, err)
 	}
 }

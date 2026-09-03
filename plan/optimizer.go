@@ -21,12 +21,15 @@ func Optimize(source Plan) (Plan, error) {
 			out = append(out, step)
 			continue
 		}
-		keyBytes, _ := json.Marshal(struct {
+		keyBytes, marshalErr := json.Marshal(struct {
 			Capability string
 			Input      map[string]any
 			Depends    []string
 			Condition  *Condition
 		}{step.Capability, step.Input, step.DependsOn, step.Condition})
+		if marshalErr != nil {
+			return Plan{}, fmt.Errorf("plan optimizer: encode step %s: %w", step.ID, marshalErr)
+		}
 		key := string(keyBytes)
 		if existing, ok := canonical[key]; ok {
 			aliases[step.ID] = existing

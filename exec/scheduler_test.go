@@ -92,6 +92,28 @@ func TestSchedulerExecutesOnlyMatchingCondition(t *testing.T) {
 	}
 }
 
+func TestSchedulerExecutesNotEqualsCondition(t *testing.T) {
+	called := false
+	location := tool.Func("location", "location", func(context.Context, struct{}) (map[string]any, error) {
+		return map[string]any{"place": "kitchen"}, nil
+	}, tool.WithCapabilities("location"))
+	reminder := tool.Func("reminder", "reminder", func(context.Context, struct{}) (string, error) {
+		called = true
+		return "created", nil
+	}, tool.WithCapabilities("reminder"))
+	execution, err := Compile(plan.Plan{Steps: []plan.Step{
+		{ID: "location", Capability: "location"},
+		{ID: "reminder", Capability: "reminder", DependsOn: []string{"location"}, Condition: &plan.Condition{SourceStep: "location", SourcePath: "place", NotEquals: "drawer"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := (Scheduler{Registry: tool.NewRegistry(location, reminder)}).Run(context.Background(), execution, nil)
+	if err != nil || len(results) != 2 || !called || results[1].Skipped {
+		t.Fatalf("not_equals branch failed: %+v err=%v called=%v", results, err, called)
+	}
+}
+
 func TestSchedulerRequiresConfirmationBeforeWrite(t *testing.T) {
 	called := false
 	write := tool.Func("write", "write", func(context.Context, struct{}) (string, error) {

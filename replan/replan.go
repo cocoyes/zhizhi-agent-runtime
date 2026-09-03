@@ -119,7 +119,10 @@ func (r *ModelReplanner) Replan(ctx context.Context, input Input) (Patch, error)
 		Failure  string                   `json:"failure"`
 		Tools    []model.PlanningToolSpec `json:"tools"`
 	}{Original: input.Original, Failure: input.Failure, Tools: model.PlanningToolCatalog(input.Tools)}
-	b, _ := json.Marshal(payload)
+	b, marshalErr := json.Marshal(payload)
+	if marshalErr != nil {
+		return Patch{}, fmt.Errorf("replanner: encode input: %w", marshalErr)
+	}
 	outputTool, err := structuredoutput.ToolFor[Patch](patchOutputToolName, "Return a patch for the existing plan. add_steps and replace_steps contain complete step objects directly; remove_steps contains existing step ID strings.")
 	if err != nil {
 		return Patch{}, fmt.Errorf("replanner: build output schema: %w", err)
@@ -133,6 +136,9 @@ func (r *ModelReplanner) Replan(ctx context.Context, input Input) (Patch, error)
 	if err != nil {
 		return Patch{}, fmt.Errorf("replanner model: %w", err)
 	}
+	if out == nil {
+		return Patch{}, fmt.Errorf("replanner model returned nil output")
+	}
 	r.trace("model.completed", map[string]any{"content": out.Text, "reasoning_content": out.ReasoningContent, "tool_call_requests": out.ToolCalls})
 	candidate, candidateErr := structuredoutput.Candidate(out, patchOutputToolName, useToolOutput)
 	for repairAttempt := 0; ; repairAttempt++ {
@@ -142,7 +148,11 @@ func (r *ModelReplanner) Replan(ctx context.Context, input Input) (Patch, error)
 			patch, decodeErr = decodePatch(candidate)
 		}
 		if decodeErr == nil {
-			_, decodeErr = patch.Apply(input.Original)
+			var patched plan.Plan
+			patched, decodeErr = patch.Apply(input.Original)
+			if decodeErr == nil {
+				decodeErr = plan.ValidateAgainstTools(patched, input.Tools)
+			}
 		}
 		if decodeErr == nil {
 			return patch, nil
@@ -156,6 +166,9 @@ func (r *ModelReplanner) Replan(ctx context.Context, input Input) (Patch, error)
 		repair, repairErr := r.Model.Generate(ctx, replanModelInput(repairMessages, outputTool, useToolOutput))
 		if repairErr != nil {
 			return Patch{}, fmt.Errorf("replanner: invalid patch: %w", decodeErr)
+		}
+		if repair == nil {
+			return Patch{}, fmt.Errorf("replanner repair model returned nil output")
 		}
 		r.trace("repair.completed", map[string]any{"content": repair.Text, "reasoning_content": repair.ReasoningContent, "tool_call_requests": repair.ToolCalls})
 		candidate, candidateErr = structuredoutput.Candidate(repair, patchOutputToolName, useToolOutput)

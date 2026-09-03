@@ -46,9 +46,12 @@ func TestWriteToolCreatesActionReceipt(t *testing.T) {
 }
 
 func TestRegistryResolvesSanitizedToolID(t *testing.T) {
-	v := Func("activity.cached", "cached activity", func(context.Context, struct{}) (string, error) { return "ok", nil }, WithCapabilities("activity.cached"))
-	values := NewRegistry(v).ResolveCapability("activity_cached")
-	if len(values) != 1 || values[0].Spec().ID != "activity.cached" {
-		t.Fatalf("sanitized tool id was not resolved: %+v", values)
+	v := Func("activity.cached", "cached activity", func(context.Context, struct{}) (string, error) { return "ok", nil }, WithCapabilities("activity.fallback"))
+	registry := NewRegistry(v)
+	for _, name := range []string{"activity.cached", "activity_cached", "activity.fallback"} {
+		values := registry.ResolveCapability(name)
+		if len(values) != 1 || values[0].Spec().ID != "activity.cached" {
+			t.Fatalf("tool id or capability %q was not resolved: %+v", name, values)
+		}
 	}
 }

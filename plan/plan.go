@@ -6,19 +6,37 @@ import (
 )
 
 type Step struct {
-	ID          string         `json:"id" jsonschema:"description=Unique stable step ID"`
-	Title       string         `json:"title,omitempty"`
-	Description string         `json:"description,omitempty"`
-	Kind        StepKind       `json:"kind,omitempty"`
-	Importance  StepImportance `json:"importance,omitempty"`
-	Capability  string         `json:"capability" jsonschema:"description=Exact capability from the available tool catalog"`
-	DependsOn   []string       `json:"depends_on,omitempty" jsonschema:"description=IDs of steps that must finish before this step"`
-	Input       map[string]any `json:"input,omitempty" jsonschema:"description=Static literal input only. Dependency values belong in bindings"`
-	Optional    bool           `json:"optional,omitempty"`
-	SideEffect  string         `json:"side_effect,omitempty"`
-	Idempotency string         `json:"idempotency,omitempty"`
-	Bindings    []InputBinding `json:"bindings,omitempty" jsonschema:"description=Typed mappings from dependency outputs into this step input"`
-	Condition   *Condition     `json:"condition,omitempty"`
+	ID              string         `json:"id" jsonschema:"description=Unique stable step ID"`
+	Title           string         `json:"title,omitempty"`
+	Description     string         `json:"description,omitempty"`
+	Kind            StepKind       `json:"kind,omitempty"`
+	Importance      StepImportance `json:"importance,omitempty"`
+	Capability      string         `json:"capability" jsonschema:"description=Exact capability from the available tool catalog"`
+	DependsOn       []string       `json:"depends_on,omitempty" jsonschema:"description=IDs of steps that must finish before this step"`
+	Input           map[string]any `json:"input,omitempty" jsonschema:"description=Static literal input only. Dependency values belong in bindings"`
+	Optional        bool           `json:"optional,omitempty"`
+	SideEffect      string         `json:"side_effect,omitempty"`
+	Idempotency     string         `json:"idempotency,omitempty"`
+	Bindings        []InputBinding `json:"bindings,omitempty" jsonschema:"description=Typed mappings from dependency outputs into this step input"`
+	Condition       *Condition     `json:"condition,omitempty"`
+	Mode            StepMode       `json:"mode,omitempty"`
+	Goal            string         `json:"goal,omitempty"`
+	SuccessCriteria string         `json:"success_criteria,omitempty"`
+	Capabilities    []string       `json:"capabilities,omitempty"`
+	ToolBudget      ToolCallBudget `json:"tool_budget,omitempty"`
+}
+
+type StepMode string
+
+const (
+	StepModeTool    StepMode = "tool"
+	StepModeAgentic StepMode = "agentic"
+)
+
+type ToolCallBudget struct {
+	Min               int `json:"min,omitempty"`
+	Max               int `json:"max,omitempty"`
+	RequiredSuccesses int `json:"required_successes,omitempty"`
 }
 
 type StepKind string
@@ -50,7 +68,8 @@ type InputBinding struct {
 type Condition struct {
 	SourceStep string `json:"source_step"`
 	SourcePath string `json:"source_path"`
-	Equals     any    `json:"equals"`
+	Equals     any    `json:"equals,omitempty"`
+	NotEquals  any    `json:"not_equals,omitempty"`
 }
 
 type Plan struct {
@@ -66,8 +85,29 @@ func (p Plan) Validate() error {
 		if step.ID == "" {
 			return fmt.Errorf("plan: step id is required")
 		}
-		if step.Capability == "" {
+		mode := step.Mode
+		if mode == "" {
+			mode = StepModeTool
+		}
+		if mode != StepModeTool && mode != StepModeAgentic {
+			return fmt.Errorf("plan: step %q has invalid mode %q", step.ID, step.Mode)
+		}
+		if mode == StepModeTool && step.Capability == "" {
 			return fmt.Errorf("plan: step %q capability is required", step.ID)
+		}
+		if mode == StepModeAgentic {
+			if step.Goal == "" {
+				return fmt.Errorf("plan: agentic step %q goal is required", step.ID)
+			}
+			if len(step.Capabilities) == 0 {
+				return fmt.Errorf("plan: agentic step %q requires an allowlist", step.ID)
+			}
+			if step.ToolBudget.Min < 0 || step.ToolBudget.Max < 0 || step.ToolBudget.RequiredSuccesses < 0 {
+				return fmt.Errorf("plan: agentic step %q has negative tool budget", step.ID)
+			}
+			if step.ToolBudget.Max > 0 && step.ToolBudget.Min > step.ToolBudget.Max {
+				return fmt.Errorf("plan: agentic step %q min tool calls exceeds max", step.ID)
+			}
 		}
 		if _, ok := seen[step.ID]; ok {
 			return fmt.Errorf("plan: duplicate step %q", step.ID)
@@ -106,6 +146,9 @@ func (p Plan) Validate() error {
 			}
 			if step.Condition.SourcePath == "" {
 				return fmt.Errorf("plan: step %q condition source_path is required", step.ID)
+			}
+			if (step.Condition.Equals == nil) == (step.Condition.NotEquals == nil) {
+				return fmt.Errorf("plan: step %q condition requires exactly one of equals or not_equals", step.ID)
 			}
 			if _, ok := seen[step.Condition.SourceStep]; !ok {
 				return fmt.Errorf("plan: step %q condition references unknown step %q", step.ID, step.Condition.SourceStep)

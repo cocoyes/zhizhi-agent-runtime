@@ -27,3 +27,19 @@ func TestValidateConditionRequiresDependency(t *testing.T) {
 		t.Fatal("expected condition dependency validation error")
 	}
 }
+
+func TestValidateConditionRequiresExactlyOneOperator(t *testing.T) {
+	withoutOperator := Plan{Steps: []Step{
+		{ID: "a", Capability: "check"},
+		{ID: "b", Capability: "branch", DependsOn: []string{"a"}, Condition: &Condition{SourceStep: "a", SourcePath: "place"}},
+	}}
+	if err := withoutOperator.Validate(); err == nil {
+		t.Fatal("expected missing condition operator to fail")
+	}
+	bothOperators := withoutOperator
+	bothOperators.Steps[1].Condition.Equals = "drawer"
+	bothOperators.Steps[1].Condition.NotEquals = "office"
+	if err := bothOperators.Validate(); err == nil {
+		t.Fatal("expected ambiguous condition operators to fail")
+	}
+}

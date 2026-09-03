@@ -32,6 +32,15 @@ type itineraryOutput struct {
 	Status string `json:"status"`
 	Plan   string `json:"plan"`
 }
+type itineraryFinishInput struct {
+	Plan string `json:"plan"`
+}
+
+func newFinishTool() tool.Tool {
+	return tool.Func("itinerary.finish", "H：输出最终行程结果", func(_ context.Context, in itineraryFinishInput) (itineraryOutput, error) {
+		return itineraryOutput{Status: "已完成", Plan: in.Plan}, nil
+	}, tool.WithCapabilities("itinerary.finish"))
+}
 
 func main() {
 	weather := tool.Func("weather.current", "A：查询指定城市的当前天气，并判断是否适合户外活动", func(_ context.Context, in weatherInput) (weatherOutput, error) {
@@ -49,9 +58,7 @@ func main() {
 	compose := tool.Func("itinerary.compose", "D：根据活动推荐整理出完整行程", func(context.Context, struct{}) (itineraryOutput, error) {
 		return itineraryOutput{Status: "已整理", Plan: "下午活动 -> 晚餐 -> 晚间散步"}, nil
 	}, tool.WithCapabilities("itinerary.compose"))
-	finish := tool.Func("itinerary.finish", "H：输出最终行程结果", func(context.Context, struct{}) (itineraryOutput, error) {
-		return itineraryOutput{Status: "已完成", Plan: "行程已准备好"}, nil
-	}, tool.WithCapabilities("itinerary.finish"))
+	finish := newFinishTool()
 
 	thinking := os.Getenv("LLM_THINKING")
 	if thinking == "" {

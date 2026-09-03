@@ -3,33 +3,55 @@ package exec
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sync"
 	"time"
 
 	"github.com/cocoyes/zhizhi-agent-runtime/contract"
+	"github.com/cocoyes/zhizhi-agent-runtime/plan"
 	"github.com/cocoyes/zhizhi-agent-runtime/policy"
 	bindingresolve "github.com/cocoyes/zhizhi-agent-runtime/resolve"
 	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
 type StepResult struct {
-	StepID     string
-	Capability string
-	ToolID     string
-	Content    any
-	Receipt    bool
-	Action     *tool.ActionReceipt
-	Err        error
-	Duration   time.Duration
-	Attempts   int
-	Fallbacks  int
-	Skipped    bool
-	Input      json.RawMessage
+	StepID           string
+	Capability       string
+	ToolID           string
+	Content          any
+	Receipt          bool
+	Action           *tool.ActionReceipt
+	Err              error
+	Duration         time.Duration
+	Attempts         int
+	Fallbacks        int
+	Skipped          bool
+	Input            json.RawMessage
+	ModelCalls       int
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
 }
 
 type InputResolver func(Step) json.RawMessage
+type AgenticResult struct {
+	Content          any
+	Action           *tool.ActionReceipt
+	ToolCalls        int
+	ModelCalls       int
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+	PendingArguments json.RawMessage
+}
+
+type Approval struct {
+	ToolID    string
+	Arguments json.RawMessage
+}
+type AgenticExecutor func(context.Context, Step, json.RawMessage) (AgenticResult, error)
 
 type Scheduler struct {
 	Registry    *tool.Registry
@@ -43,6 +65,11 @@ type Scheduler struct {
 	Deadline DeadlinePolicy
 	Barrier  *Barrier
 	Observe  func(policy.Event)
+	// Completed replays successful checkpointed steps without executing them.
+	Completed map[string]StepResult
+	// Approvals bind resume authorization to an exact step, tool and arguments.
+	Approvals map[string]Approval
+	Agentic   AgenticExecutor
 }
 
 type DeadlinePolicy struct {
@@ -96,6 +123,11 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 	}
 	results := make([]StepResult, 0, len(execution.Steps))
 	evidence := make(map[string]any, len(execution.Steps))
+	for id, result := range s.Completed {
+		if result.Err == nil && !result.Skipped {
+			evidence[id] = result.Content
+		}
+	}
 	for _, batch := range execution.Batches {
 		batchResults := make([]StepResult, len(batch.Steps))
 		var wg sync.WaitGroup
@@ -104,10 +136,14 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 			wg.Add(1)
 			go func(index int, current Step) {
 				defer wg.Done()
+				if completed, ok := s.Completed[current.ID]; ok {
+					batchResults[index] = completed
+					return
+				}
 				started := time.Now()
 				result := StepResult{StepID: current.ID, Capability: current.Capability}
 				if current.Condition != nil {
-					matched, ok := conditionMatches(evidence[current.Condition.SourceStep], current.Condition.SourcePath, current.Condition.Equals)
+					matched, ok := conditionMatches(evidence[current.Condition.SourceStep], current.Condition)
 					if !ok || !matched {
 						result.Skipped = true
 						result.Duration = time.Since(started)
@@ -131,6 +167,43 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 					return
 				}
 				defer func() { <-sem }()
+				if current.Mode == plan.StepModeAgentic {
+					if s.Agentic == nil {
+						result.Err = errors.New("scheduler: agentic executor is required")
+						result.Duration = time.Since(started)
+						batchResults[index] = result
+						return
+					}
+					payload, resolveErr := resolvePayload(current, resolve, evidence)
+					if resolveErr != nil {
+						result.Err = resolveErr
+						result.Duration = time.Since(started)
+						batchResults[index] = result
+						return
+					}
+					result.Input = append(json.RawMessage(nil), payload...)
+					if approval, ok := s.Approvals[current.ID]; ok {
+						current.ApprovedToolID = approval.ToolID
+						current.ApprovedInput = append([]byte(nil), approval.Arguments...)
+					}
+					out, runErr := s.Agentic(ctx, current, payload)
+					result.Content, result.Action, result.Err = out.Content, out.Action, runErr
+					if result.Action != nil {
+						result.ToolID = result.Action.ToolID
+						result.Action.StepID = current.ID
+					}
+					if len(out.PendingArguments) > 0 {
+						result.Input = append(json.RawMessage(nil), out.PendingArguments...)
+					}
+					result.Attempts = out.ToolCalls
+					result.ModelCalls = out.ModelCalls
+					result.PromptTokens = out.PromptTokens
+					result.CompletionTokens = out.CompletionTokens
+					result.TotalTokens = out.TotalTokens
+					result.Duration = time.Since(started)
+					batchResults[index] = result
+					return
+				}
 				candidates := s.Registry.ResolveCapability(current.Capability)
 				if len(candidates) == 0 {
 					result.Err = fmt.Errorf("capability %q has no registered tool", current.Capability)
@@ -145,26 +218,18 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 					return
 				}
 				defer s.Barrier.release(candidates[0].Spec())
-				payload := json.RawMessage(`{}`)
-				if resolve != nil {
-					payload = resolve(current)
-				} else if current.Input != nil || len(current.Bindings) > 0 {
-					input := current.Input
-					if input == nil {
-						input = map[string]any{}
-					}
-					bound, bindErr := bindingresolve.ApplyBindings(input, evidence, current.Bindings)
-					if bindErr != nil {
-						result.Err = bindErr
-						result.Duration = time.Since(started)
-						batchResults[index] = result
-						return
-					}
-					payload, _ = json.Marshal(bound)
+				payload, resolveErr := resolvePayload(current, resolve, evidence)
+				if resolveErr != nil {
+					result.Err = resolveErr
+					result.Duration = time.Since(started)
+					batchResults[index] = result
+					return
 				}
 				result.Input = append(json.RawMessage(nil), payload...)
 				candidateSpec := candidates[0].Spec()
-				if candidateSpec.RequiresConfirmation() {
+				approval, approvedStep := s.Approvals[current.ID]
+				approvedStep = approvedStep && approval.ToolID == candidateSpec.ID && jsonEqual(approval.Arguments, payload)
+				if candidateSpec.RequiresConfirmation() && !approvedStep {
 					approved := false
 					if s.Confirm != nil {
 						var confirmErr error
@@ -195,6 +260,9 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 				}
 				out, err := runner.Execute(ctx, candidates, payload)
 				result.ToolID, result.Content, result.Receipt, result.Action, result.Err = out.ToolID, out.Value.Content, out.Value.Receipt, out.Value.Action, err
+				if result.Action != nil {
+					result.Action.StepID = current.ID
+				}
 				result.Attempts, result.Fallbacks = out.Attempts, out.Fallbacks
 				result.Duration = time.Since(started)
 				batchResults[index] = result
@@ -210,6 +278,11 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 				return results, fmt.Errorf("scheduler: step %s: %w", result.StepID, result.Err)
 			}
 		}
+		for _, result := range batchResults {
+			if result.Action != nil && result.Action.Status == contract.ActionConfirmationRequired {
+				return results, nil
+			}
+		}
 		if err := ctx.Err(); err != nil {
 			return results, err
 		}
@@ -217,7 +290,15 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 	return results, nil
 }
 
-func conditionMatches(source any, path string, expected any) (bool, bool) {
+func jsonEqual(left, right json.RawMessage) bool {
+	var a, b any
+	if json.Unmarshal(left, &a) != nil || json.Unmarshal(right, &b) != nil {
+		return string(left) == string(right)
+	}
+	return reflect.DeepEqual(a, b)
+}
+
+func conditionMatches(source any, condition *plan.Condition) (bool, bool) {
 	encoded, err := json.Marshal(source)
 	if err != nil {
 		return false, false
@@ -226,11 +307,37 @@ func conditionMatches(source any, path string, expected any) (bool, bool) {
 	if err := json.Unmarshal(encoded, &generic); err != nil {
 		return false, false
 	}
-	value, ok := bindingresolve.Lookup(generic, path)
+	value, ok := bindingresolve.Lookup(generic, condition.SourcePath)
 	if !ok {
 		return false, false
 	}
-	return reflect.DeepEqual(value, normalizeConditionValue(expected)), true
+	if condition.NotEquals != nil {
+		return !reflect.DeepEqual(value, normalizeConditionValue(condition.NotEquals)), true
+	}
+	return reflect.DeepEqual(value, normalizeConditionValue(condition.Equals)), true
+}
+
+func resolvePayload(current Step, resolve InputResolver, evidence map[string]any) (json.RawMessage, error) {
+	payload := json.RawMessage(`{}`)
+	if resolve != nil {
+		return resolve(current), nil
+	}
+	if current.Input == nil && len(current.Bindings) == 0 {
+		return payload, nil
+	}
+	input := current.Input
+	if input == nil {
+		input = map[string]any{}
+	}
+	bound, err := bindingresolve.ApplyBindings(input, evidence, current.Bindings)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(bound)
+	if err != nil {
+		return nil, fmt.Errorf("scheduler: encode step %s input: %w", current.ID, err)
+	}
+	return encoded, nil
 }
 
 func normalizeConditionValue(value any) any {
