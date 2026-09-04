@@ -359,9 +359,6 @@ go build ./...
 
 `make verify` runs the standard local checks. Real-provider tests are opt-in; the default suite is offline and deterministic.
 
-## Project Status
-
-Current release: `v1.0.0`. The public API is intentionally small, and changes affecting tool execution, side effects, plan semantics, or provider compatibility are covered by focused tests.
 
 ## Security and License
 

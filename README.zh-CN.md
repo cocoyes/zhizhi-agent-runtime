@@ -301,6 +301,6 @@ go build ./...
 
 `make verify` 会执行标准本地检查。真实 provider 测试需要显式开启，默认测试套件离线且确定性可复现。
 
-## 项目状态、安全与许可
+## 安全与许可
 
-当前版本：`v1.0.0`。涉及工具执行、副作用、计划语义和 provider 兼容性的变更都应配套专项测试。请私下报告安全漏洞，并附上受影响版本、最小复现和影响说明。详见 [SECURITY.md](SECURITY.md) 和 [LICENSE](LICENSE)。
+涉及工具执行、副作用、计划语义和 provider 兼容性的变更都应配套专项测试。请私下报告安全漏洞，并附上受影响版本、最小复现和影响说明。详见 [SECURITY.md](SECURITY.md) 和 [LICENSE](LICENSE)。
