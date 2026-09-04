@@ -12,6 +12,17 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+func startFixtureServer(t *testing.T, toolName string) string {
+	t.Helper()
+	server := sdk.NewServer(&sdk.Implementation{Name: toolName, Version: "1"}, nil)
+	sdk.AddTool(server, &sdk.Tool{Name: toolName, Description: toolName, InputSchema: map[string]any{"type": "object"}}, func(context.Context, *sdk.CallToolRequest, struct{}) (*sdk.CallToolResult, any, error) {
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: toolName}}}, nil, nil
+	})
+	httpServer := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return server }, nil))
+	t.Cleanup(httpServer.Close)
+	return httpServer.URL
+}
+
 func TestAllowDenyAndNormalize(t *testing.T) {
 	p := &Provider{cfg: Config{ID: "demo", AllowTools: []string{"weather"}, DenyTools: []string{"blocked"}, CapabilityMappings: map[string][]string{"weather": {"weather.current"}}, ToolPolicies: map[string]ToolPolicy{"weather": {SideEffect: tool.SideEffectRead, Idempotency: tool.IdempotencySafe, RiskLevel: tool.RiskLow, Confirmation: tool.ConfirmationNever}}}}
 	weather := p.normalize(&sdk.Tool{Name: "weather", Description: "current weather", InputSchema: map[string]any{"type": "object"}})

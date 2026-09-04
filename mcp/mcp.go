@@ -29,12 +29,17 @@ const (
 )
 
 type Config struct {
+	// Name and Description are the small, tool-free catalog exposed to an LLM
+	// by CapabilityProvider. Name defaults to ID.
 	ID                 string
+	Name               string
+	Description        string
 	Transport          Transport
 	Endpoint           string
 	AllowTools         []string
 	DenyTools          []string
 	CapabilityMappings map[string][]string
+	DefaultToolPolicy  *ToolPolicy
 	ToolPolicies       map[string]ToolPolicy
 	Headers            map[string]string
 	ConnectTimeout     time.Duration
@@ -352,25 +357,35 @@ func (p *Provider) normalize(definition *sdk.Tool) tool.Tool {
 		description = definition.Name
 	}
 	spec := tool.Spec{ID: p.cfg.ID + "." + definition.Name, Description: description, InputSchema: input, OutputSchema: output, Capabilities: capabilities, ProviderID: p.cfg.ID, Version: "mcp", SideEffect: tool.SideEffectUnknown, Idempotency: tool.IdempotencyUnknown, Retryable: false, RiskLevel: tool.RiskHigh, Confirmation: tool.ConfirmationOnRisk, TrustLevel: "untrusted"}
+	if p.cfg.DefaultToolPolicy != nil {
+		applyToolPolicy(&spec, *p.cfg.DefaultToolPolicy)
+	}
 	if configured, ok := p.cfg.ToolPolicies[definition.Name]; ok {
-		if configured.SideEffect != "" {
-			spec.SideEffect = configured.SideEffect
-		}
-		if configured.Idempotency != "" {
-			spec.Idempotency = configured.Idempotency
-		}
-		spec.Retryable = configured.Retryable
-		if configured.RiskLevel != "" {
-			spec.RiskLevel = configured.RiskLevel
-		}
-		if configured.Confirmation != "" {
-			spec.Confirmation = configured.Confirmation
-		}
+		applyToolPolicy(&spec, configured)
 	}
 	if spec.Idempotency == tool.IdempotencyNonIdempotent || spec.Idempotency == tool.IdempotencyUnknown {
 		spec.Retryable = false
 	}
 	return &remoteTool{provider: p, name: definition.Name, spec: spec, modelSpec: model.ToolSpec{Type: "function", Function: model.FunctionSpec{Name: spec.ID, Description: spec.Description, Parameters: input}, Capabilities: append([]string(nil), capabilities...), OutputSchema: output}}
+}
+
+func applyToolPolicy(spec *tool.Spec, configured ToolPolicy) {
+	if spec == nil {
+		return
+	}
+	if configured.SideEffect != "" {
+		spec.SideEffect = configured.SideEffect
+	}
+	if configured.Idempotency != "" {
+		spec.Idempotency = configured.Idempotency
+	}
+	spec.Retryable = configured.Retryable
+	if configured.RiskLevel != "" {
+		spec.RiskLevel = configured.RiskLevel
+	}
+	if configured.Confirmation != "" {
+		spec.Confirmation = configured.Confirmation
+	}
 }
 
 type remoteTool struct {

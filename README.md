@@ -316,6 +316,21 @@ if unavailable. Providers support catalog refresh, fingerprint/version drift,
 bounded reconnect backoff, cancellation, and context-bounded close. MCP tools
 are treated as an untrusted boundary. See [SECURITY.md](SECURITY.md).
 
+For a large MCP fleet, use a capability provider so the model first sees only
+server names and descriptions. The runtime connects and calls `ListTools` only
+for the selected server or servers (one request may select several):
+
+```go
+capabilities, err := runtimemcp.NewCapabilityProvider(
+    runtimemcp.Config{ID: "maps", Description: "Maps, weather, and routing", Endpoint: mapsURL},
+    runtimemcp.Config{ID: "knowledge", Description: "Encyclopedia search", Endpoint: knowledgeURL},
+)
+agent, err := zhizhi.New(
+    zhizhi.WithModel(model),
+    zhizhi.WithMCPCapabilityProvider(capabilities),
+)
+```
+
 ## Observability
 
 ```go
@@ -340,7 +355,7 @@ Responses expose `Evidence`, `Actions`, `Warnings`, and statistics for model cal
 | `03-retry` | Transient retry policy | `go run ./examples/03-retry` |
 | `04-fallback` | Capability fallback | `go run ./examples/04-fallback` |
 | `05-local-mcp-server` | Local MCP server | `go run ./examples/05-local-mcp-server` |
-| `06-mcp-client` | MCP discovery and allow-lists | `go run ./examples/06-mcp-client` |
+| `06-mcp-client` | Real-model, multi-server MCP capability selection | `go run ./examples/06-mcp-client` |
 | `07-complex-plan` | Model-planned execution | `go run ./examples/07-complex-plan` |
 | `08-observability` | JSONL traces | `go run ./examples/08-observability` |
 | `09-config-agent` | YAML configuration | `go run ./examples/09-config-agent` |

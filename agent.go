@@ -129,29 +129,30 @@ type RunIDGenerator func() (string, error)
 type AgentHandler func(context.Context, Request, ...RunOption) (*Response, error)
 type AgentMiddleware func(AgentHandler) AgentHandler
 type config struct {
-	model                 model.Model
-	systemPrompt          string
-	tools                 []tool.Tool
-	planner               plan.Planner
-	replanner             plan.Replanner
-	mcpConfigs            []runtimemcp.Config
-	observer              observe.Observer
-	budget                Budget
-	guard                 Guard
-	confirm               ConfirmFunc
-	failurePolicy         policy.Runner
-	router                route.Router
-	broker                *tool.Broker
-	maxParallel           int
-	checkpointStore       checkpoint.Store
-	modelMiddleware       []middleware.ModelMiddleware
-	modelStreamMiddleware []middleware.ModelStreamMiddleware
-	toolMiddleware        []middleware.ToolMiddleware
-	toolStreamMiddleware  []middleware.ToolStreamMiddleware
-	plannerMiddleware     []middleware.PlannerMiddleware
-	replannerMiddleware   []middleware.ReplannerMiddleware
-	agentMiddleware       []AgentMiddleware
-	runIDGenerator        RunIDGenerator
+	model                  model.Model
+	systemPrompt           string
+	tools                  []tool.Tool
+	planner                plan.Planner
+	replanner              plan.Replanner
+	mcpConfigs             []runtimemcp.Config
+	mcpCapabilityProviders []*runtimemcp.CapabilityProvider
+	observer               observe.Observer
+	budget                 Budget
+	guard                  Guard
+	confirm                ConfirmFunc
+	failurePolicy          policy.Runner
+	router                 route.Router
+	broker                 *tool.Broker
+	maxParallel            int
+	checkpointStore        checkpoint.Store
+	modelMiddleware        []middleware.ModelMiddleware
+	modelStreamMiddleware  []middleware.ModelStreamMiddleware
+	toolMiddleware         []middleware.ToolMiddleware
+	toolStreamMiddleware   []middleware.ToolStreamMiddleware
+	plannerMiddleware      []middleware.PlannerMiddleware
+	replannerMiddleware    []middleware.ReplannerMiddleware
+	agentMiddleware        []AgentMiddleware
+	runIDGenerator         RunIDGenerator
 }
 
 func WithModel(v model.Model) Option { return func(c *config) error { c.model = v; return nil } }
@@ -169,6 +170,18 @@ func WithReplanner(v plan.Replanner) Option {
 }
 func WithMCP(v runtimemcp.Config) Option {
 	return func(c *config) error { c.mcpConfigs = append(c.mcpConfigs, v); return nil }
+}
+
+// WithMCPCapabilityProvider enables model-driven MCP server selection. Only
+// servers selected for a request are connected and have their tools listed.
+func WithMCPCapabilityProvider(v *runtimemcp.CapabilityProvider) Option {
+	return func(c *config) error {
+		if v == nil {
+			return errors.New("zhizhi: MCP capability provider cannot be nil")
+		}
+		c.mcpCapabilityProviders = append(c.mcpCapabilityProviders, v)
+		return nil
+	}
 }
 func WithObserver(v observe.Observer) Option {
 	return func(c *config) error { c.observer = v; return nil }
@@ -287,6 +300,18 @@ func (r *runtime) prepare(ctx context.Context) error {
 		provider.AddToRegistry(r.registry)
 	}
 	return r.registry.Validate()
+}
+
+func (r *runtime) selectMCPTools(ctx context.Context, selector model.Model, request string) ([]tool.Tool, error) {
+	var selected []tool.Tool
+	for _, provider := range r.cfg.mcpCapabilityProviders {
+		selection, err := provider.Select(ctx, selector, request)
+		if err != nil {
+			return nil, err
+		}
+		selected = append(selected, selection.Tools...)
+	}
+	return selected, nil
 }
 
 func catalogFingerprint(registry *tool.Registry) string {
@@ -824,7 +849,12 @@ func (r *runtime) run(ctx context.Context, req Request, options ...RunOption) (*
 	if err := r.prepare(ctx); err != nil {
 		return nil, err
 	}
-	runCfg, registry, err := r.newRunConfig(options)
+	selected, err := r.selectMCPTools(ctx, r.cfg.model, req.Input)
+	if err != nil {
+		return nil, err
+	}
+	effectiveOptions := append(append([]RunOption(nil), options...), WithRunTools(selected...))
+	runCfg, registry, err := r.newRunConfig(effectiveOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -1289,6 +1319,11 @@ func (r *runtime) Close(ctx context.Context) error {
 			return err
 		}
 	}
+	for _, provider := range r.cfg.mcpCapabilityProviders {
+		if err := provider.Close(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1314,7 +1349,13 @@ func (r *runtime) Stream(ctx context.Context, req Request, options ...RunOption)
 		cancel()
 		return nil, err
 	}
-	runCfg, registry, err := r.newRunConfig(options)
+	selected, err := r.selectMCPTools(runCtx, r.cfg.model, req.Input)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	effectiveOptions := append(append([]RunOption(nil), options...), WithRunTools(selected...))
+	runCfg, registry, err := r.newRunConfig(effectiveOptions)
 	if err != nil {
 		cancel()
 		return nil, err
