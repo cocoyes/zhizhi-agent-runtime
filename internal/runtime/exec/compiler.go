@@ -1,3 +1,4 @@
+// Package exec implements the runtime's private plan compiler and scheduler.
 package exec
 
 import (

@@ -1,5 +1,4 @@
-// Package react implements a bounded model-tool observation loop reusable by
-// simple agents and agentic plan steps.
+// Package react implements the runtime's private bounded model-tool loop.
 package react
 
 import (

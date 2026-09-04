@@ -10,7 +10,6 @@ import (
 	"github.com/cocoyes/zhizhi-agent-runtime/model"
 	"github.com/cocoyes/zhizhi-agent-runtime/observe"
 	"github.com/cocoyes/zhizhi-agent-runtime/plan"
-	"github.com/cocoyes/zhizhi-agent-runtime/replan"
 	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
@@ -136,9 +135,9 @@ func TestComplexStreamEmitsStepAndFinalEvents(t *testing.T) {
 
 type recoveryPlanner struct{ called bool }
 
-func (p *recoveryPlanner) Replan(context.Context, replan.Input) (replan.Patch, error) {
+func (p *recoveryPlanner) Replan(context.Context, plan.Input) (plan.Patch, error) {
 	p.called = true
-	return replan.Patch{Remove: []string{"weather"}}, nil
+	return plan.Patch{Remove: []string{"weather"}}, nil
 }
 func TestComplexRunReplansOnceAfterRequiredFailure(t *testing.T) {
 	failing := tool.Func("weather", "weather", func(context.Context, struct {
@@ -161,8 +160,8 @@ func TestComplexRunReplansOnceAfterRequiredFailure(t *testing.T) {
 
 type noopReplanner struct{}
 
-func (noopReplanner) Replan(context.Context, replan.Input) (replan.Patch, error) {
-	return replan.Patch{}, nil
+func (noopReplanner) Replan(context.Context, plan.Input) (plan.Patch, error) {
+	return plan.Patch{}, nil
 }
 
 func TestComplexFailureEmitsRunFailedOnce(t *testing.T) {

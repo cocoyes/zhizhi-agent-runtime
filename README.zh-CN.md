@@ -10,6 +10,8 @@
 
 [English README](README.md)
 
+[架构与包边界](docs/architecture.md)
+
 面向生产环境的 Go Agent Runtime，帮助 Agent 完成规划、工具调用、失败恢复和全过程审计。
 
 Zhizhi 把普通 Go 函数注册成经过校验的工具，把复杂需求编排成依赖安全的执行计划，并对条件分支、重规划和副作用进行显式控制。

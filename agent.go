@@ -15,19 +15,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cocoyes/zhizhi-agent-runtime/capability"
 	"github.com/cocoyes/zhizhi-agent-runtime/checkpoint"
 	"github.com/cocoyes/zhizhi-agent-runtime/contract"
-	"github.com/cocoyes/zhizhi-agent-runtime/exec"
+	"github.com/cocoyes/zhizhi-agent-runtime/internal/runtime/exec"
+	"github.com/cocoyes/zhizhi-agent-runtime/internal/runtime/react"
 	runtimemcp "github.com/cocoyes/zhizhi-agent-runtime/mcp"
 	"github.com/cocoyes/zhizhi-agent-runtime/middleware"
 	"github.com/cocoyes/zhizhi-agent-runtime/model"
 	"github.com/cocoyes/zhizhi-agent-runtime/observe"
 	"github.com/cocoyes/zhizhi-agent-runtime/plan"
-	"github.com/cocoyes/zhizhi-agent-runtime/planner"
 	"github.com/cocoyes/zhizhi-agent-runtime/policy"
-	"github.com/cocoyes/zhizhi-agent-runtime/react"
-	"github.com/cocoyes/zhizhi-agent-runtime/replan"
 	"github.com/cocoyes/zhizhi-agent-runtime/route"
 	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
@@ -135,8 +132,8 @@ type config struct {
 	model                 model.Model
 	systemPrompt          string
 	tools                 []tool.Tool
-	planner               planner.Planner
-	replanner             replan.Replanner
+	planner               plan.Planner
+	replanner             plan.Replanner
 	mcpConfigs            []runtimemcp.Config
 	observer              observe.Observer
 	budget                Budget
@@ -144,7 +141,7 @@ type config struct {
 	confirm               ConfirmFunc
 	failurePolicy         policy.Runner
 	router                route.Router
-	broker                *capability.Broker
+	broker                *tool.Broker
 	maxParallel           int
 	checkpointStore       checkpoint.Store
 	modelMiddleware       []middleware.ModelMiddleware
@@ -164,10 +161,10 @@ func WithSystemPrompt(v string) Option {
 func WithTools(v ...tool.Tool) Option {
 	return func(c *config) error { c.tools = append(c.tools, v...); return nil }
 }
-func WithPlanner(v planner.Planner) Option {
+func WithPlanner(v plan.Planner) Option {
 	return func(c *config) error { c.planner = v; return nil }
 }
-func WithReplanner(v replan.Replanner) Option {
+func WithReplanner(v plan.Replanner) Option {
 	return func(c *config) error { c.replanner = v; return nil }
 }
 func WithMCP(v runtimemcp.Config) Option {
@@ -262,7 +259,7 @@ func New(options ...Option) (Agent, error) {
 		}
 		providers = append(providers, provider)
 	}
-	return &runtime{cfg: c, registry: registry, mcpProviders: providers, observer: c.observer, broker: capability.NewBroker(registry), maxParallel: c.budget.MaxParallelSteps}, nil
+	return &runtime{cfg: c, registry: registry, mcpProviders: providers, observer: c.observer, broker: tool.NewBroker(registry), maxParallel: c.budget.MaxParallelSteps}, nil
 }
 
 func defaultRunID() (string, error) {
@@ -764,7 +761,7 @@ func (r *runtime) resumeComplex(ctx context.Context, checkpointValue *checkpoint
 type runtime struct {
 	cfg          *config
 	registry     *tool.Registry
-	broker       *capability.Broker
+	broker       *tool.Broker
 	maxParallel  int
 	mcpProviders []*runtimemcp.Provider
 	observer     observe.Observer
@@ -996,7 +993,7 @@ func (r *runtime) run(ctx context.Context, req Request, options ...RunOption) (*
 func (r *runtime) runComplex(ctx context.Context, req Request, runID string, registry *tool.Registry, runCfg runConfig) (*Response, error) {
 	p := r.cfg.planner
 	if p == nil {
-		modelPlanner := planner.NewModelPlanner(runCfg.model)
+		modelPlanner := plan.NewModelPlanner(runCfg.model)
 		modelPlanner.Trace = func(event string, details map[string]any) {
 			r.emit(observe.Event{Type: "planner." + event, RunID: runID, Details: details})
 		}
@@ -1097,13 +1094,13 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 		}
 		rp := r.cfg.replanner
 		if rp == nil {
-			modelReplanner := replan.NewModelReplanner(runCfg.model)
+			modelReplanner := plan.NewModelReplanner(runCfg.model)
 			modelReplanner.Trace = func(event string, details map[string]any) {
 				r.emit(observe.Event{Type: "replan." + event, RunID: runID, PlanVersion: semantic.Version, Details: details})
 			}
 			rp = modelReplanner
 		}
-		replanInput := replan.Input{Original: semantic, Failure: err.Error(), Tools: registry.ModelSpecs()}
+		replanInput := plan.Input{Original: semantic, Failure: err.Error(), Tools: registry.ModelSpecs()}
 		r.emit(observe.Event{Type: "replan.started", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"error": err.Error()}, Details: map[string]any{"request": map[string]any{"original": semantic, "failure": err.Error(), "tools": model.PlanningToolCatalog(replanInput.Tools)}}})
 		var replanHandler middleware.ReplannerHandler = rp.Replan
 		replannerMiddleware := append(append([]middleware.ReplannerMiddleware(nil), r.cfg.replannerMiddleware...), runCfg.replannerMiddleware...)

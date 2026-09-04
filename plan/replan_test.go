@@ -1,10 +1,9 @@
-package replan
+package plan
 
 import (
 	"context"
 	"encoding/json"
 	"github.com/cocoyes/zhizhi-agent-runtime/model"
-	"github.com/cocoyes/zhizhi-agent-runtime/plan"
 	"testing"
 )
 
@@ -15,13 +14,13 @@ func TestPatchAcceptsObjectRemoveEntriesAndSingleStepObjects(t *testing.T) {
 	}
 }
 
-type toolCallingScripted struct{ input model.ModelInput }
+type replanToolCallingScripted struct{ input model.ModelInput }
 
-func (s *toolCallingScripted) ID() string { return "tool-calling-scripted" }
-func (s *toolCallingScripted) Capabilities() model.ModelCapabilities {
+func (s *replanToolCallingScripted) ID() string { return "tool-calling-scripted" }
+func (s *replanToolCallingScripted) Capabilities() model.ModelCapabilities {
 	return model.ModelCapabilities{ToolCalling: true}
 }
-func (s *toolCallingScripted) Generate(_ context.Context, input model.ModelInput) (*model.ModelOutput, error) {
+func (s *replanToolCallingScripted) Generate(_ context.Context, input model.ModelInput) (*model.ModelOutput, error) {
 	s.input = input
 	var call model.ToolCallRequest
 	call.Type = "function"
@@ -29,13 +28,13 @@ func (s *toolCallingScripted) Generate(_ context.Context, input model.ModelInput
 	call.Function.Arguments = `{"replace_steps":[{"id":"failed","capability":"cached"}]}`
 	return &model.ModelOutput{ToolCalls: []model.ToolCallRequest{call}}, nil
 }
-func (s *toolCallingScripted) Stream(context.Context, model.ModelInput) (model.Stream, error) {
+func (s *replanToolCallingScripted) Stream(context.Context, model.ModelInput) (model.Stream, error) {
 	return nil, nil
 }
 
 func TestModelReplannerUsesForcedTypedPatchToolLikeEino(t *testing.T) {
-	m := &toolCallingScripted{}
-	patch, err := NewModelReplanner(m).Replan(context.Background(), Input{Original: plan.Plan{Version: 1, Steps: []plan.Step{{ID: "failed", Capability: "remote"}}}, Failure: "failed"})
+	m := &replanToolCallingScripted{}
+	patch, err := NewModelReplanner(m).Replan(context.Background(), Input{Original: Plan{Version: 1, Steps: []Step{{ID: "failed", Capability: "remote"}}}, Failure: "failed"})
 	if err != nil || len(patch.Replace) != 1 {
 		t.Fatalf("unexpected patch: %+v err=%v", patch, err)
 	}
@@ -62,50 +61,52 @@ func TestDecodePatchRejectsReplacementWithoutID(t *testing.T) {
 }
 
 func TestPatchApply(t *testing.T) {
-	source := plan.Plan{Version: 1, Steps: []plan.Step{{ID: "weather", Capability: "weather"}, {ID: "poi", Capability: "poi", DependsOn: []string{"weather"}}}}
-	out, err := (Patch{Remove: []string{"poi"}, Add: []plan.Step{{ID: "fallback", Capability: "local.poi"}}}).Apply(source)
+	source := Plan{Version: 1, Steps: []Step{{ID: "weather", Capability: "weather"}, {ID: "poi", Capability: "poi", DependsOn: []string{"weather"}}}}
+	out, err := (Patch{Remove: []string{"poi"}, Add: []Step{{ID: "fallback", Capability: "local.poi"}}}).Apply(source)
 	if err != nil || out.Version != 2 || len(out.Steps) != 2 {
 		t.Fatalf("unexpected patch: %+v %v", out, err)
 	}
 }
 
-type scripted struct{}
+type replanScripted struct{}
 
-func (scripted) ID() string { return "scripted" }
-func (scripted) Capabilities() model.ModelCapabilities {
+func (replanScripted) ID() string { return "scripted" }
+func (replanScripted) Capabilities() model.ModelCapabilities {
 	return model.ModelCapabilities{JSONMode: true}
 }
-func (scripted) Generate(context.Context, model.ModelInput) (*model.ModelOutput, error) {
+func (replanScripted) Generate(context.Context, model.ModelInput) (*model.ModelOutput, error) {
 	return &model.ModelOutput{Text: `{"remove_steps":["failed"]}`}, nil
 }
-func (scripted) Stream(context.Context, model.ModelInput) (model.Stream, error) { return nil, nil }
+func (replanScripted) Stream(context.Context, model.ModelInput) (model.Stream, error) {
+	return nil, nil
+}
 func TestModelReplannerParsesPatch(t *testing.T) {
-	p, err := NewModelReplanner(scripted{}).Replan(context.Background(), Input{Original: plan.Plan{Version: 1, Steps: []plan.Step{{ID: "failed", Capability: "remote"}}}, Failure: "timeout"})
+	p, err := NewModelReplanner(replanScripted{}).Replan(context.Background(), Input{Original: Plan{Version: 1, Steps: []Step{{ID: "failed", Capability: "remote"}}}, Failure: "timeout"})
 	if err != nil || len(p.Remove) != 1 {
 		t.Fatalf("unexpected patch: %+v %v", p, err)
 	}
 }
 
-type repairScripted struct{ calls int }
+type replanRepairScripted struct{ calls int }
 
-func (s *repairScripted) ID() string { return "repair-scripted" }
-func (s *repairScripted) Capabilities() model.ModelCapabilities {
+func (s *replanRepairScripted) ID() string { return "repair-scripted" }
+func (s *replanRepairScripted) Capabilities() model.ModelCapabilities {
 	return model.ModelCapabilities{JSONMode: true}
 }
-func (s *repairScripted) Generate(context.Context, model.ModelInput) (*model.ModelOutput, error) {
+func (s *replanRepairScripted) Generate(context.Context, model.ModelInput) (*model.ModelOutput, error) {
 	s.calls++
 	if s.calls == 1 {
 		return &model.ModelOutput{Text: `{}`}, nil
 	}
 	return &model.ModelOutput{Text: `{"replace_steps":[{"id":"failed","capability":"cached"}]}`}, nil
 }
-func (s *repairScripted) Stream(context.Context, model.ModelInput) (model.Stream, error) {
+func (s *replanRepairScripted) Stream(context.Context, model.ModelInput) (model.Stream, error) {
 	return nil, nil
 }
 
 func TestModelReplannerRepairsEmptyPatchInsteadOfReusingPlan(t *testing.T) {
-	m := &repairScripted{}
-	patch, err := NewModelReplanner(m).Replan(context.Background(), Input{Original: plan.Plan{Version: 1, Steps: []plan.Step{{ID: "failed", Capability: "remote"}}}, Failure: "tool failed"})
+	m := &replanRepairScripted{}
+	patch, err := NewModelReplanner(m).Replan(context.Background(), Input{Original: Plan{Version: 1, Steps: []Step{{ID: "failed", Capability: "remote"}}}, Failure: "tool failed"})
 	if err != nil || m.calls != 2 || len(patch.Replace) != 1 || patch.Replace[0].Capability != "cached" {
 		t.Fatalf("expected a repaired non-empty patch after two calls: patch=%+v calls=%d err=%v", patch, m.calls, err)
 	}

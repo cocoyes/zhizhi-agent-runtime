@@ -12,7 +12,6 @@ import (
 	"github.com/cocoyes/zhizhi-agent-runtime/model"
 	"github.com/cocoyes/zhizhi-agent-runtime/observe"
 	"github.com/cocoyes/zhizhi-agent-runtime/plan"
-	"github.com/cocoyes/zhizhi-agent-runtime/replan"
 	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 	api "go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -139,7 +138,7 @@ func (i Instrumentation) PlannerMiddleware(next middleware.PlannerHandler) middl
 }
 
 func (i Instrumentation) ReplannerMiddleware(next middleware.ReplannerHandler) middleware.ReplannerHandler {
-	return func(ctx context.Context, input replan.Input) (replan.Patch, error) {
+	return func(ctx context.Context, input plan.Input) (plan.Patch, error) {
 		ctx, span := i.Tracer.Start(ctx, "planner.replan")
 		result, err := next(ctx, input)
 		finish(span, err)

@@ -13,7 +13,6 @@ import (
 
 	"github.com/cocoyes/zhizhi-agent-runtime/contract"
 	"github.com/cocoyes/zhizhi-agent-runtime/model"
-	"github.com/cocoyes/zhizhi-agent-runtime/security"
 	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -139,7 +138,7 @@ func (p *Provider) connect(ctx context.Context) (*sdk.ClientSession, []tool.Tool
 	}
 	values := make([]tool.Tool, 0, len(result.Tools))
 	for _, definition := range result.Tools {
-		if definition == nil || !p.allowed(definition.Name) || security.ValidateToolText(definition.Description) != nil {
+		if definition == nil || !p.allowed(definition.Name) || validateToolText(definition.Description) != nil {
 			continue
 		}
 		values = append(values, p.normalize(definition))
@@ -247,7 +246,7 @@ func (p *Provider) Refresh(ctx context.Context) error {
 	}
 	values := make([]tool.Tool, 0, len(result.Tools))
 	for _, definition := range result.Tools {
-		if definition != nil && p.allowed(definition.Name) && security.ValidateToolText(definition.Description) == nil {
+		if definition != nil && p.allowed(definition.Name) && validateToolText(definition.Description) == nil {
 			values = append(values, p.normalize(definition))
 		}
 	}

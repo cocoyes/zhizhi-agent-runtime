@@ -1,3 +1,4 @@
+// Package observe records runtime events, statistics, and replayable traces.
 package observe
 
 import (

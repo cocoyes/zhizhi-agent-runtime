@@ -1,4 +1,4 @@
-package security
+package mcp
 
 import (
 	"encoding/json"
@@ -6,27 +6,27 @@ import (
 	"strings"
 )
 
-type TrustLevel string
+type trustLevel string
 
 const (
-	Trusted   TrustLevel = "trusted"
-	Untrusted TrustLevel = "untrusted"
+	trusted   trustLevel = "trusted"
+	untrusted trustLevel = "untrusted"
 )
 
-type Evidence struct {
-	Trust TrustLevel `json:"trust"`
+type trustEvidence struct {
+	Trust trustLevel `json:"trust"`
 	Data  any        `json:"data"`
 }
 
-func WrapUntrusted(data any) Evidence { return Evidence{Trust: Untrusted, Data: data} }
-func PromptData(data any) string {
+func wrapUntrusted(data any) trustEvidence { return trustEvidence{Trust: untrusted, Data: data} }
+func promptData(data any) string {
 	b, err := json.Marshal(data)
 	if err != nil {
 		return "<untrusted-evidence encoding_error=\"true\"></untrusted-evidence>"
 	}
 	return "<untrusted-evidence>\n" + string(b) + "\n</untrusted-evidence>"
 }
-func ValidateToolText(text string) error {
+func validateToolText(text string) error {
 	lower := strings.ToLower(text)
 	for _, marker := range []string{"ignore previous instructions", "system prompt", "developer message", "reveal secret"} {
 		if strings.Contains(lower, marker) {

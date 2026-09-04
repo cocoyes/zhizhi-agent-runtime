@@ -1,14 +1,13 @@
-package replay
+package observe
 
 import (
 	"bytes"
-	"github.com/cocoyes/zhizhi-agent-runtime/observe"
 	"testing"
 )
 
 func TestTraceRoundTrip(t *testing.T) {
 	var original Trace
-	original.Append(observe.Event{Type: "run.started"})
+	original.Append(Event{Type: "run.started"})
 	var b bytes.Buffer
 	if err := original.WriteJSONL(&b); err != nil {
 		t.Fatal(err)

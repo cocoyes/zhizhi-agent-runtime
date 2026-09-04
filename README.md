@@ -10,6 +10,8 @@
 
 [中文文档](README.zh-CN.md)
 
+[Architecture and package boundaries](docs/architecture.md)
+
 Production-grade Go runtime for agents that plan, act, recover, and remain auditable.
 
 Zhizhi is a model-agnostic execution layer for real applications. It turns ordinary Go functions into validated tools, builds dependency-safe plans, handles conditional branches and bounded replanning, and makes side effects explicit.

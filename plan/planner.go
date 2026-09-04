@@ -1,4 +1,4 @@
-package planner
+package plan
 
 import (
 	"bytes"
@@ -8,12 +8,11 @@ import (
 
 	"github.com/cocoyes/zhizhi-agent-runtime/internal/structuredoutput"
 	"github.com/cocoyes/zhizhi-agent-runtime/model"
-	"github.com/cocoyes/zhizhi-agent-runtime/plan"
 	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
 type Planner interface {
-	Plan(context.Context, string, []model.ToolSpec) (plan.Plan, error)
+	Plan(context.Context, string, []model.ToolSpec) (Plan, error)
 }
 
 type ModelPlanner struct {
@@ -26,9 +25,9 @@ const planOutputToolName = "zhizhi_emit_plan"
 
 func NewModelPlanner(m model.Model) *ModelPlanner { return &ModelPlanner{Model: m} }
 
-func (p *ModelPlanner) Plan(ctx context.Context, input string, tools []model.ToolSpec) (plan.Plan, error) {
+func (p *ModelPlanner) Plan(ctx context.Context, input string, tools []model.ToolSpec) (Plan, error) {
 	if p == nil || p.Model == nil {
-		return plan.Plan{}, fmt.Errorf("planner: model is required")
+		return Plan{}, fmt.Errorf("planner: model is required")
 	}
 	system := p.Prompt
 	if system == "" {
@@ -36,30 +35,30 @@ func (p *ModelPlanner) Plan(ctx context.Context, input string, tools []model.Too
 	}
 	catalog, err := json.Marshal(model.PlanningToolCatalog(tools))
 	if err != nil {
-		return plan.Plan{}, fmt.Errorf("planner: encode tool catalog: %w", err)
+		return Plan{}, fmt.Errorf("planner: encode tool catalog: %w", err)
 	}
 	// The planner needs tool metadata, not permission to call tools. Supplying
 	// API-level tools here lets many models return a tool call instead of the
 	// requested plan JSON, leaving the planner with empty text.
 	user := input + "\n可用工具目录（仅用于规划，不要调用）：\n" + string(catalog)
-	outputTool, err := structuredoutput.ToolFor[plan.Plan](planOutputToolName, "Return the complete executable plan. The arguments must exactly match this schema.")
+	outputTool, err := structuredoutput.ToolFor[Plan](planOutputToolName, "Return the complete executable plan. The arguments must exactly match this schema.")
 	if err != nil {
-		return plan.Plan{}, fmt.Errorf("planner: build output schema: %w", err)
+		return Plan{}, fmt.Errorf("planner: build output schema: %w", err)
 	}
 	useToolOutput := p.Model.Capabilities().ToolCalling
 	modelInput := structuredModelInput([]model.Message{{Role: model.RoleSystem, Content: system}, {Role: model.RoleUser, Content: user}}, outputTool, useToolOutput)
 	p.trace("model.request", map[string]any{"messages": modelInput.Messages, "output_tool": outputTool, "tool_choice": modelInput.ToolChoice})
 	out, err := p.Model.Generate(ctx, modelInput)
 	if err != nil {
-		return plan.Plan{}, fmt.Errorf("planner model: %w", err)
+		return Plan{}, fmt.Errorf("planner model: %w", err)
 	}
 	if out == nil {
-		return plan.Plan{}, fmt.Errorf("planner model returned nil output")
+		return Plan{}, fmt.Errorf("planner model returned nil output")
 	}
 	p.trace("model.completed", map[string]any{"content": out.Text, "reasoning_content": out.ReasoningContent, "tool_call_requests": out.ToolCalls})
 	candidate, candidateErr := structuredoutput.Candidate(out, planOutputToolName, useToolOutput)
 	for repairAttempt := 0; ; repairAttempt++ {
-		var result plan.Plan
+		var result Plan
 		decodeErr := candidateErr
 		if decodeErr == nil {
 			result, decodeErr = decodePlan(candidate, tools)
@@ -68,17 +67,17 @@ func (p *ModelPlanner) Plan(ctx context.Context, input string, tools []model.Too
 			return result, nil
 		}
 		if repairAttempt >= 2 {
-			return plan.Plan{}, fmt.Errorf("planner: invalid structured output after repair: %w", decodeErr)
+			return Plan{}, fmt.Errorf("planner: invalid structured output after repair: %w", decodeErr)
 		}
 		repairRequest := user + "\nInvalid candidate:\n" + candidate + "\nValidation error:\n" + decodeErr.Error()
 		p.trace("repair.request", map[string]any{"content": repairRequest})
 		repairMessages := []model.Message{{Role: model.RoleSystem, Content: "Produce the required plan tool call again after correcting the validation error. Preserve intent. All steps need non-empty id and capability fields, dependencies must form an acyclic graph, and every required tool input must be covered by static input or bindings. Never put {{step.path}} templates in input; represent every dependency value with a bindings entry. Do not pre-plan failure-only fallback steps; runtime replanning handles actual failures."}, {Role: model.RoleUser, Content: repairRequest}}
 		repair, repairErr := p.Model.Generate(ctx, structuredModelInput(repairMessages, outputTool, useToolOutput))
 		if repairErr != nil {
-			return plan.Plan{}, fmt.Errorf("planner: invalid structured output: %w", decodeErr)
+			return Plan{}, fmt.Errorf("planner: invalid structured output: %w", decodeErr)
 		}
 		if repair == nil {
-			return plan.Plan{}, fmt.Errorf("planner repair model returned nil output")
+			return Plan{}, fmt.Errorf("planner repair model returned nil output")
 		}
 		p.trace("repair.completed", map[string]any{"content": repair.Text, "reasoning_content": repair.ReasoningContent, "tool_call_requests": repair.ToolCalls})
 		candidate, candidateErr = structuredoutput.Candidate(repair, planOutputToolName, useToolOutput)
@@ -98,31 +97,31 @@ func (p *ModelPlanner) trace(event string, details map[string]any) {
 	}
 }
 
-func decodePlan(text string, tools []model.ToolSpec) (plan.Plan, error) {
-	var result plan.Plan
+func decodePlan(text string, tools []model.ToolSpec) (Plan, error) {
+	var result Plan
 	if err := structuredoutput.DecodeStrict(text, &result); err != nil {
-		return plan.Plan{}, err
+		return Plan{}, err
 	}
 	if result.Version == 0 {
 		result.Version = 1
 	}
 	normalized, err := result.Normalize()
 	if err != nil {
-		return plan.Plan{}, fmt.Errorf("invalid plan: %w", err)
+		return Plan{}, fmt.Errorf("invalid plan: %w", err)
 	}
 	if len(normalized.Steps) == 0 {
-		return plan.Plan{}, fmt.Errorf("invalid plan: initial plan must contain at least one executable step")
+		return Plan{}, fmt.Errorf("invalid plan: initial plan must contain at least one executable step")
 	}
-	if err := plan.ValidateAgainstTools(normalized, tools); err != nil {
-		return plan.Plan{}, fmt.Errorf("invalid plan: %w", err)
+	if err := ValidateAgainstTools(normalized, tools); err != nil {
+		return Plan{}, fmt.Errorf("invalid plan: %w", err)
 	}
 	for _, step := range normalized.Steps {
 		encoded, err := json.Marshal(step.Input)
 		if err != nil {
-			return plan.Plan{}, fmt.Errorf("encode input for step %q: %w", step.ID, err)
+			return Plan{}, fmt.Errorf("encode input for step %q: %w", step.ID, err)
 		}
 		if bytes.Contains(encoded, []byte("{{")) {
-			return plan.Plan{}, fmt.Errorf("invalid plan: step %q contains a template reference in input; use bindings instead", step.ID)
+			return Plan{}, fmt.Errorf("invalid plan: step %q contains a template reference in input; use bindings instead", step.ID)
 		}
 		if len(step.Bindings) == 0 && step.Input != nil {
 			for _, spec := range tools {
@@ -130,7 +129,7 @@ func decodePlan(text string, tools []model.ToolSpec) (plan.Plan, error) {
 					continue
 				}
 				if err := tool.ValidateValue(spec.Function.Name, spec.Function.Parameters, step.Input); err != nil {
-					return plan.Plan{}, fmt.Errorf("invalid plan input for step %q: %w; dependency values must use bindings", step.ID, err)
+					return Plan{}, fmt.Errorf("invalid plan input for step %q: %w; dependency values must use bindings", step.ID, err)
 				}
 				break
 			}

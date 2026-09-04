@@ -1,4 +1,4 @@
-package replan
+package plan
 
 import (
 	"context"
@@ -7,11 +7,10 @@ import (
 
 	"github.com/cocoyes/zhizhi-agent-runtime/internal/structuredoutput"
 	"github.com/cocoyes/zhizhi-agent-runtime/model"
-	"github.com/cocoyes/zhizhi-agent-runtime/plan"
 )
 
 type Input struct {
-	Original plan.Plan
+	Original Plan
 	Failure  string
 	Tools    []model.ToolSpec
 }
@@ -21,9 +20,9 @@ type Replanner interface {
 }
 
 type Patch struct {
-	Add     []plan.Step `json:"add_steps,omitempty" jsonschema:"description=Complete new step objects to add. Do not include steps that already exist."`
-	Replace []plan.Step `json:"replace_steps,omitempty" jsonschema:"description=Complete replacement step objects directly. Each id must identify an existing step. Never use from/to wrapper objects."`
-	Remove  []string    `json:"remove_steps,omitempty" jsonschema:"description=IDs of existing steps to remove. All remaining dependencies must stay valid."`
+	Add     []Step   `json:"add_steps,omitempty" jsonschema:"description=Complete new step objects to add. Do not include steps that already exist."`
+	Replace []Step   `json:"replace_steps,omitempty" jsonschema:"description=Complete replacement step objects directly. Each id must identify an existing step. Never use from/to wrapper objects."`
+	Remove  []string `json:"remove_steps,omitempty" jsonschema:"description=IDs of existing steps to remove. All remaining dependencies must stay valid."`
 }
 
 type patchStepReference struct {
@@ -31,8 +30,8 @@ type patchStepReference struct {
 }
 
 type patchOutput struct {
-	Add     []plan.Step          `json:"add_steps"`
-	Replace []plan.Step          `json:"replace_steps"`
+	Add     []Step               `json:"add_steps"`
+	Replace []Step               `json:"replace_steps"`
 	Remove  []patchStepReference `json:"remove_steps"`
 }
 
@@ -53,7 +52,7 @@ func decodePatch(text string) (Patch, error) {
 	}
 	for _, group := range []struct {
 		name  string
-		steps []plan.Step
+		steps []Step
 	}{{name: "add_steps", steps: patch.Add}, {name: "replace_steps", steps: patch.Replace}} {
 		for _, step := range group.steps {
 			if step.ID == "" {
@@ -67,30 +66,30 @@ func decodePatch(text string) (Patch, error) {
 	return patch, nil
 }
 
-func (p Patch) Apply(source plan.Plan) (plan.Plan, error) {
-	steps := make(map[string]plan.Step, len(source.Steps))
+func (p Patch) Apply(source Plan) (Plan, error) {
+	steps := make(map[string]Step, len(source.Steps))
 	for _, step := range source.Steps {
 		steps[step.ID] = step
 	}
 	for _, id := range p.Remove {
 		if _, ok := steps[id]; !ok {
-			return plan.Plan{}, fmt.Errorf("replan: cannot remove unknown step %q", id)
+			return Plan{}, fmt.Errorf("replan: cannot remove unknown step %q", id)
 		}
 		delete(steps, id)
 	}
 	for _, step := range p.Replace {
 		if _, ok := steps[step.ID]; !ok {
-			return plan.Plan{}, fmt.Errorf("replan: cannot replace unknown step %q", step.ID)
+			return Plan{}, fmt.Errorf("replan: cannot replace unknown step %q", step.ID)
 		}
 		steps[step.ID] = step
 	}
 	for _, step := range p.Add {
 		if _, ok := steps[step.ID]; ok {
-			return plan.Plan{}, fmt.Errorf("replan: duplicate added step %q", step.ID)
+			return Plan{}, fmt.Errorf("replan: duplicate added step %q", step.ID)
 		}
 		steps[step.ID] = step
 	}
-	out := plan.Plan{Version: source.Version + 1, Steps: make([]plan.Step, 0, len(steps))}
+	out := Plan{Version: source.Version + 1, Steps: make([]Step, 0, len(steps))}
 	for _, step := range steps {
 		out.Steps = append(out.Steps, step)
 	}
@@ -115,7 +114,7 @@ func (r *ModelReplanner) Replan(ctx context.Context, input Input) (Patch, error)
 		prompt = "Repair the execution plan after a required step failed. Return only JSON with add_steps, replace_steps, and remove_steps. Preserve successful work and all valid downstream steps. Prefer replacing the failed step with a compatible fallback capability; update downstream dependencies to the replacement when needed. Do not remove final composition steps merely because an upstream tool failed. References must use bindings whose source_path exists in output_schema and target_path exists in input_schema. remove_steps must contain step ID strings only. Do not add retry steps."
 	}
 	payload := struct {
-		Original plan.Plan                `json:"original"`
+		Original Plan                     `json:"original"`
 		Failure  string                   `json:"failure"`
 		Tools    []model.PlanningToolSpec `json:"tools"`
 	}{Original: input.Original, Failure: input.Failure, Tools: model.PlanningToolCatalog(input.Tools)}
@@ -148,10 +147,10 @@ func (r *ModelReplanner) Replan(ctx context.Context, input Input) (Patch, error)
 			patch, decodeErr = decodePatch(candidate)
 		}
 		if decodeErr == nil {
-			var patched plan.Plan
+			var patched Plan
 			patched, decodeErr = patch.Apply(input.Original)
 			if decodeErr == nil {
-				decodeErr = plan.ValidateAgainstTools(patched, input.Tools)
+				decodeErr = ValidateAgainstTools(patched, input.Tools)
 			}
 		}
 		if decodeErr == nil {

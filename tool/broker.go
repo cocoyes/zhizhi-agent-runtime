@@ -1,19 +1,17 @@
-package capability
+package tool
 
 import (
 	"fmt"
 	"sort"
-
-	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
 type Candidate struct {
 	Capability string
-	Tool       tool.Tool
+	Tool       Tool
 }
-type Broker struct{ Registry *tool.Registry }
+type Broker struct{ Registry *Registry }
 
-func NewBroker(registry *tool.Registry) *Broker { return &Broker{Registry: registry} }
+func NewBroker(registry *Registry) *Broker { return &Broker{Registry: registry} }
 func (b *Broker) Resolve(capability string) ([]Candidate, error) {
 	if b == nil || b.Registry == nil {
 		return nil, fmt.Errorf("capability: registry is required")

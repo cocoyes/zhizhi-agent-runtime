@@ -7,7 +7,6 @@ import (
 
 	"github.com/cocoyes/zhizhi-agent-runtime/model"
 	"github.com/cocoyes/zhizhi-agent-runtime/plan"
-	"github.com/cocoyes/zhizhi-agent-runtime/replan"
 	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
@@ -30,7 +29,7 @@ type PlannerInput struct {
 }
 type PlannerHandler func(context.Context, PlannerInput) (plan.Plan, error)
 type PlannerMiddleware func(PlannerHandler) PlannerHandler
-type ReplannerHandler func(context.Context, replan.Input) (replan.Patch, error)
+type ReplannerHandler func(context.Context, plan.Input) (plan.Patch, error)
 type ReplannerMiddleware func(ReplannerHandler) ReplannerHandler
 
 func WrapModel(base model.Model, generate []ModelMiddleware, streams []ModelStreamMiddleware) model.Model {

@@ -1,3 +1,5 @@
+// Package plan contains the executable plan model and the model-backed
+// planning and replanning pipeline.
 package plan
 
 import (

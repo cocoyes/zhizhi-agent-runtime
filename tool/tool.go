@@ -1,3 +1,4 @@
+// Package tool defines validated tools, registries, and capability resolution.
 package tool
 
 import (

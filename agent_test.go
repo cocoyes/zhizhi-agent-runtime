@@ -11,7 +11,6 @@ import (
 	"github.com/cocoyes/zhizhi-agent-runtime/contract"
 	"github.com/cocoyes/zhizhi-agent-runtime/middleware"
 	"github.com/cocoyes/zhizhi-agent-runtime/model"
-	"github.com/cocoyes/zhizhi-agent-runtime/runtimeerr"
 	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
@@ -383,7 +382,7 @@ func TestCloseRejectsNewRunsAndDuplicateRunIDs(t *testing.T) {
 	if _, err := a.Run(context.Background(), Request{Input: "two", Mode: &mode}); err == nil {
 		t.Fatal("expected duplicate run id rejection")
 	} else {
-		var structured *runtimeerr.Error
+		var structured *RuntimeError
 		if !errors.As(err, &structured) {
 			t.Fatalf("expected structured error, got %T", err)
 		}

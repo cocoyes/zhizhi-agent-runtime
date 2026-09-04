@@ -12,7 +12,6 @@ import (
 	"github.com/cocoyes/zhizhi-agent-runtime/contract"
 	"github.com/cocoyes/zhizhi-agent-runtime/plan"
 	"github.com/cocoyes/zhizhi-agent-runtime/policy"
-	bindingresolve "github.com/cocoyes/zhizhi-agent-runtime/resolve"
 	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
@@ -307,7 +306,7 @@ func conditionMatches(source any, condition *plan.Condition) (bool, bool) {
 	if err := json.Unmarshal(encoded, &generic); err != nil {
 		return false, false
 	}
-	value, ok := bindingresolve.Lookup(generic, condition.SourcePath)
+	value, ok := Lookup(generic, condition.SourcePath)
 	if !ok {
 		return false, false
 	}
@@ -329,7 +328,7 @@ func resolvePayload(current Step, resolve InputResolver, evidence map[string]any
 	if input == nil {
 		input = map[string]any{}
 	}
-	bound, err := bindingresolve.ApplyBindings(input, evidence, current.Bindings)
+	bound, err := ApplyBindings(input, evidence, current.Bindings)
 	if err != nil {
 		return nil, err
 	}
