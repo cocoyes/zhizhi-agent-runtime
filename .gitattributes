@@ -1,1 +1,2 @@
 *.go linguist-language=Go
+.agents/** linguist-vendored
