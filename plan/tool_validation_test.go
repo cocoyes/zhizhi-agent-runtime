@@ -37,3 +37,23 @@ func TestValidateAgainstToolsAcceptsRequiredBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestValidateAgainstToolsRejectsMissingConditionPath(t *testing.T) {
+	value := Plan{Steps: []Step{
+		{ID: "source", Capability: "source"},
+		{ID: "target", Capability: "target", DependsOn: []string{"source"}, Input: map[string]any{"temperature": 1}, Condition: &Condition{SourceStep: "source", SourcePath: "/missing", NotEquals: "x"}},
+	}}
+	if err := ValidateAgainstTools(value, validationCatalog()); err == nil {
+		t.Fatal("expected missing condition output path to be rejected")
+	}
+}
+
+func TestValidateAgainstToolsRejectsConditionTypeMismatch(t *testing.T) {
+	value := Plan{Steps: []Step{
+		{ID: "source", Capability: "source"},
+		{ID: "target", Capability: "target", DependsOn: []string{"source"}, Input: map[string]any{"temperature": 1}, Condition: &Condition{SourceStep: "source", SourcePath: "/temperature", Equals: "hot"}},
+	}}
+	if err := ValidateAgainstTools(value, validationCatalog()); err == nil {
+		t.Fatal("expected condition type mismatch to be rejected")
+	}
+}

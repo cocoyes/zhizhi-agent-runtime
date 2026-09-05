@@ -55,11 +55,16 @@ const (
 )
 
 type Spec struct {
-	ID             string
-	Description    string
-	InputSchema    json.RawMessage
-	OutputSchema   json.RawMessage
-	Capabilities   []string
+	ID           string
+	Description  string
+	InputSchema  json.RawMessage
+	OutputSchema json.RawMessage
+	Capabilities []string
+	// SemanticGroup identifies capabilities that can satisfy the same business
+	// intent. Fallbacks is an explicit allowlist; the runtime never infers
+	// replacement compatibility from names or descriptions.
+	SemanticGroup  string
+	Fallbacks      []string
 	SideEffect     SideEffectClass
 	Idempotency    Idempotency
 	Timeout        time.Duration
@@ -112,6 +117,10 @@ type FuncOption func(*Spec)
 
 func WithCapabilities(values ...string) FuncOption {
 	return func(s *Spec) { s.Capabilities = append(s.Capabilities, values...) }
+}
+func WithSemanticGroup(value string) FuncOption { return func(s *Spec) { s.SemanticGroup = value } }
+func WithFallbacks(values ...string) FuncOption {
+	return func(s *Spec) { s.Fallbacks = append(s.Fallbacks, values...) }
 }
 func WithSideEffect(v SideEffectClass) FuncOption      { return func(s *Spec) { s.SideEffect = v } }
 func WithIdempotency(v Idempotency) FuncOption         { return func(s *Spec) { s.Idempotency = v } }
@@ -183,7 +192,7 @@ func (s Spec) Validate() error {
 
 func (t *funcTool[I, O]) Spec() Spec { return t.spec }
 func (t *funcTool[I, O]) ModelSpec() model.ToolSpec {
-	return model.ToolSpec{Type: "function", Function: model.FunctionSpec{Name: t.spec.ID, Description: t.spec.Description, Parameters: t.spec.InputSchema}, Capabilities: append([]string(nil), t.spec.Capabilities...), OutputSchema: t.spec.OutputSchema}
+	return model.ToolSpec{Type: "function", Function: model.FunctionSpec{Name: t.spec.ID, Description: t.spec.Description, Parameters: t.spec.InputSchema}, Capabilities: append([]string(nil), t.spec.Capabilities...), OutputSchema: t.spec.OutputSchema, SemanticGroup: t.spec.SemanticGroup, Fallbacks: append([]string(nil), t.spec.Fallbacks...), SideEffect: string(t.spec.SideEffect), Idempotency: string(t.spec.Idempotency)}
 }
 func (t *funcTool[I, O]) Call(ctx context.Context, raw json.RawMessage) (Result, error) {
 	if err := ValidateInput(t.spec, raw); err != nil {
@@ -342,7 +351,16 @@ func (r *Registry) ModelSpecs() []model.ToolSpec {
 	sort.Strings(ids)
 	out := make([]model.ToolSpec, 0, len(r.tools))
 	for _, id := range ids {
-		out = append(out, r.tools[id].ModelSpec())
+		value := r.tools[id]
+		modelSpec := value.ModelSpec()
+		spec := value.Spec()
+		modelSpec.Capabilities = append([]string(nil), spec.Capabilities...)
+		modelSpec.OutputSchema = append(json.RawMessage(nil), spec.OutputSchema...)
+		modelSpec.SemanticGroup = spec.SemanticGroup
+		modelSpec.Fallbacks = append([]string(nil), spec.Fallbacks...)
+		modelSpec.SideEffect = string(spec.SideEffect)
+		modelSpec.Idempotency = string(spec.Idempotency)
+		out = append(out, modelSpec)
 	}
 	return out
 }

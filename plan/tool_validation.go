@@ -3,6 +3,7 @@ package plan
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/cocoyes/zhizhi-agent-runtime/model"
@@ -40,37 +41,55 @@ func ValidateAgainstTools(value Plan, tools []model.ToolSpec) error {
 			if err := tool.ValidateValue(spec.Function.Name, spec.Function.Parameters, input); err != nil {
 				return fmt.Errorf("plan: invalid input for step %q: %w; dependency values must use bindings", step.ID, err)
 			}
-			continue
-		}
-		var inputSchema map[string]any
-		if err := json.Unmarshal(spec.Function.Parameters, &inputSchema); err != nil {
-			return fmt.Errorf("plan: decode input schema for step %q: %w", step.ID, err)
-		}
-		if err := validateStaticInput(step.ID, input, inputSchema); err != nil {
-			return err
-		}
-		for _, binding := range step.Bindings {
-			sourceStep := steps[binding.SourceStep]
-			sourceSpec, found := findTool(tools, sourceStep.Capability)
-			if !found {
-				return fmt.Errorf("plan: binding source step %q has no tool", binding.SourceStep)
+		} else {
+			var inputSchema map[string]any
+			if err := json.Unmarshal(spec.Function.Parameters, &inputSchema); err != nil {
+				return fmt.Errorf("plan: decode input schema for step %q: %w", step.ID, err)
 			}
-			sourceNode, sourceOK := schemaAt(sourceSpec.OutputSchema, binding.SourcePath)
-			targetNode, targetOK := schemaAt(spec.Function.Parameters, binding.TargetPath)
-			if !sourceOK {
-				return fmt.Errorf("plan: step %q binding source path %q is absent from step %q output schema", step.ID, binding.SourcePath, binding.SourceStep)
+			if err := validateStaticInput(step.ID, input, inputSchema); err != nil {
+				return err
 			}
-			if !targetOK {
-				return fmt.Errorf("plan: step %q binding target path %q is absent from input schema", step.ID, binding.TargetPath)
-			}
-			if sourceType, _ := sourceNode["type"].(string); sourceType != "" {
-				if targetType, _ := targetNode["type"].(string); targetType != "" && sourceType != targetType {
-					return fmt.Errorf("plan: step %q binding %q type %s does not match target %q type %s", step.ID, binding.SourcePath, sourceType, binding.TargetPath, targetType)
+			for _, binding := range step.Bindings {
+				sourceStep := steps[binding.SourceStep]
+				sourceSpec, found := findTool(tools, sourceStep.Capability)
+				if !found {
+					return fmt.Errorf("plan: binding source step %q has no tool", binding.SourceStep)
+				}
+				sourceNode, sourceOK := schemaAt(sourceSpec.OutputSchema, binding.SourcePath)
+				targetNode, targetOK := schemaAt(spec.Function.Parameters, binding.TargetPath)
+				if !sourceOK {
+					return fmt.Errorf("plan: step %q binding source path %q is absent from step %q output schema", step.ID, binding.SourcePath, binding.SourceStep)
+				}
+				if !targetOK {
+					return fmt.Errorf("plan: step %q binding target path %q is absent from input schema", step.ID, binding.TargetPath)
+				}
+				if sourceType, _ := sourceNode["type"].(string); sourceType != "" {
+					if targetType, _ := targetNode["type"].(string); targetType != "" && sourceType != targetType {
+						return fmt.Errorf("plan: step %q binding %q type %s does not match target %q type %s", step.ID, binding.SourcePath, sourceType, binding.TargetPath, targetType)
+					}
 				}
 			}
+			if missing := missingRequired(inputSchema, input, step.Bindings, ""); missing != "" {
+				return fmt.Errorf("plan: step %q required input %q is not provided by input or bindings", step.ID, missing)
+			}
 		}
-		if missing := missingRequired(inputSchema, input, step.Bindings, ""); missing != "" {
-			return fmt.Errorf("plan: step %q required input %q is not provided by input or bindings", step.ID, missing)
+		if step.Condition != nil {
+			sourceStep := steps[step.Condition.SourceStep]
+			sourceSpec, found := findTool(tools, sourceStep.Capability)
+			if !found {
+				return fmt.Errorf("plan: condition source step %q has no tool", step.Condition.SourceStep)
+			}
+			node, ok := schemaAt(sourceSpec.OutputSchema, step.Condition.SourcePath)
+			if !ok {
+				return fmt.Errorf("plan: step %q condition source path %q is absent from step %q output schema", step.ID, step.Condition.SourcePath, step.Condition.SourceStep)
+			}
+			conditionValue := step.Condition.Equals
+			if step.Condition.NotEquals != nil {
+				conditionValue = step.Condition.NotEquals
+			}
+			if schemaType, _ := node["type"].(string); schemaType != "" && !conditionTypeMatches(schemaType, conditionValue) {
+				return fmt.Errorf("plan: step %q condition value type does not match source path %q type %s", step.ID, step.Condition.SourcePath, schemaType)
+			}
 		}
 	}
 	return nil
@@ -149,19 +168,73 @@ func bindingCovers(bindings []InputBinding, path string) bool {
 }
 
 func schemaAt(raw json.RawMessage, path string) (map[string]any, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, false
+	}
 	var current map[string]any
 	if json.Unmarshal(raw, &current) != nil {
 		return nil, false
 	}
 	for _, part := range strings.Split(strings.TrimPrefix(normalizePointer(path), "/"), "/") {
-		properties, _ := current["properties"].(map[string]any)
-		next, ok := properties[unescapePointer(part)].(map[string]any)
+		var next map[string]any
+		var ok bool
+		if current["type"] == "array" {
+			_, numeric := parseArrayIndex(part)
+			if !numeric {
+				return nil, false
+			}
+			next, ok = current["items"].(map[string]any)
+		} else {
+			properties, _ := current["properties"].(map[string]any)
+			next, ok = properties[unescapePointer(part)].(map[string]any)
+		}
 		if !ok {
 			return nil, false
 		}
 		current = next
 	}
 	return current, true
+}
+
+func parseArrayIndex(value string) (int, bool) {
+	if value == "" {
+		return 0, false
+	}
+	n := 0
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n, true
+}
+
+func conditionTypeMatches(schemaType string, value any) bool {
+	switch schemaType {
+	case "boolean":
+		_, ok := value.(bool)
+		return ok
+	case "string":
+		_, ok := value.(string)
+		return ok
+	case "number", "integer":
+		switch value.(type) {
+		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, json.Number:
+			return true
+		}
+		return false
+	case "array":
+		v := reflect.ValueOf(value)
+		return v.IsValid() && (v.Kind() == reflect.Array || v.Kind() == reflect.Slice)
+	case "object":
+		v := reflect.ValueOf(value)
+		return v.IsValid() && v.Kind() == reflect.Map
+	case "null":
+		return value == nil
+	default:
+		return true
+	}
 }
 
 func normalizePointer(path string) string {

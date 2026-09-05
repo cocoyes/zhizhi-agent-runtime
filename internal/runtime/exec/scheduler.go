@@ -16,22 +16,24 @@ import (
 )
 
 type StepResult struct {
-	StepID           string
-	Capability       string
-	ToolID           string
-	Content          any
-	Receipt          bool
-	Action           *tool.ActionReceipt
-	Err              error
-	Duration         time.Duration
-	Attempts         int
-	Fallbacks        int
-	Skipped          bool
-	Input            json.RawMessage
-	ModelCalls       int
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
+	StepID              string
+	RequestedCapability string
+	Capability          string
+	ToolID              string
+	Content             any
+	Receipt             bool
+	Action              *tool.ActionReceipt
+	Err                 error
+	Duration            time.Duration
+	Attempts            int
+	Fallbacks           int
+	Skipped             bool
+	ConditionUnknown    bool
+	Input               json.RawMessage
+	ModelCalls          int
+	PromptTokens        int
+	CompletionTokens    int
+	TotalTokens         int
 }
 
 type InputResolver func(Step) json.RawMessage
@@ -140,11 +142,12 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 					return
 				}
 				started := time.Now()
-				result := StepResult{StepID: current.ID, Capability: current.Capability}
+				result := StepResult{StepID: current.ID, RequestedCapability: current.Capability, Capability: current.Capability}
 				if current.Condition != nil {
 					matched, ok := conditionMatches(evidence[current.Condition.SourceStep], current.Condition)
 					if !ok || !matched {
 						result.Skipped = true
+						result.ConditionUnknown = !ok
 						result.Duration = time.Since(started)
 						batchResults[index] = result
 						return
@@ -259,6 +262,12 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 				}
 				out, err := runner.Execute(ctx, candidates, payload)
 				result.ToolID, result.Content, result.Receipt, result.Action, result.Err = out.ToolID, out.Value.Content, out.Value.Receipt, out.Value.Action, err
+				if err != nil && out.ToolID != "" {
+					if invoked, ok := s.Registry.Get(out.ToolID); ok && invoked.Spec().IsWrite() && out.ErrorKind == policy.Ambiguous {
+						now := time.Now().UTC()
+						result.Action = &tool.ActionReceipt{ToolID: out.ToolID, Status: contract.ActionUnknown, ExecutedAt: now, Timestamp: now, Message: "write outcome is ambiguous; automatic retry and fallback were blocked"}
+					}
+				}
 				if result.Action != nil {
 					result.Action.StepID = current.ID
 				}
@@ -273,6 +282,11 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 			if result.Err == nil {
 				evidence[result.StepID] = result.Content
 			}
+		}
+		// Every goroutine in the batch has already completed. Preserve all of
+		// their results before reporting a required failure so successful peers
+		// can be reused after replanning.
+		for _, result := range batchResults {
 			if result.Err != nil && !isOptional(result.StepID, batch.Steps) {
 				return results, fmt.Errorf("scheduler: step %s: %w", result.StepID, result.Err)
 			}

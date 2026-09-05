@@ -11,7 +11,6 @@ import (
 	"io"
 	"reflect"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -349,17 +348,19 @@ type complexResumeState struct {
 }
 
 type checkpointStepResult struct {
-	StepID     string              `json:"step_id"`
-	Capability string              `json:"capability"`
-	ToolID     string              `json:"tool_id"`
-	Content    any                 `json:"content,omitempty"`
-	Receipt    bool                `json:"receipt,omitempty"`
-	Action     *tool.ActionReceipt `json:"action,omitempty"`
-	Duration   time.Duration       `json:"duration,omitempty"`
-	Attempts   int                 `json:"attempts,omitempty"`
-	Fallbacks  int                 `json:"fallbacks,omitempty"`
-	Skipped    bool                `json:"skipped,omitempty"`
-	Input      json.RawMessage     `json:"input,omitempty"`
+	StepID              string              `json:"step_id"`
+	RequestedCapability string              `json:"requested_capability,omitempty"`
+	Capability          string              `json:"capability"`
+	ToolID              string              `json:"tool_id"`
+	Content             any                 `json:"content,omitempty"`
+	Receipt             bool                `json:"receipt,omitempty"`
+	Action              *tool.ActionReceipt `json:"action,omitempty"`
+	Duration            time.Duration       `json:"duration,omitempty"`
+	Attempts            int                 `json:"attempts,omitempty"`
+	Fallbacks           int                 `json:"fallbacks,omitempty"`
+	Skipped             bool                `json:"skipped,omitempty"`
+	ConditionUnknown    bool                `json:"condition_unknown,omitempty"`
+	Input               json.RawMessage     `json:"input,omitempty"`
 }
 
 func persistStepResults(values []exec.StepResult, pendingStep string) []checkpointStepResult {
@@ -368,7 +369,7 @@ func persistStepResults(values []exec.StepResult, pendingStep string) []checkpoi
 		if value.StepID == pendingStep || value.Err != nil {
 			continue
 		}
-		out = append(out, checkpointStepResult{StepID: value.StepID, Capability: value.Capability, ToolID: value.ToolID, Content: value.Content, Receipt: value.Receipt, Action: value.Action, Duration: value.Duration, Attempts: value.Attempts, Fallbacks: value.Fallbacks, Skipped: value.Skipped, Input: append(json.RawMessage(nil), value.Input...)})
+		out = append(out, checkpointStepResult{StepID: value.StepID, RequestedCapability: value.RequestedCapability, Capability: value.Capability, ToolID: value.ToolID, Content: value.Content, Receipt: value.Receipt, Action: value.Action, Duration: value.Duration, Attempts: value.Attempts, Fallbacks: value.Fallbacks, Skipped: value.Skipped, ConditionUnknown: value.ConditionUnknown, Input: append(json.RawMessage(nil), value.Input...)})
 	}
 	return out
 }
@@ -376,7 +377,7 @@ func persistStepResults(values []exec.StepResult, pendingStep string) []checkpoi
 func restoreStepResults(values []checkpointStepResult) map[string]exec.StepResult {
 	out := make(map[string]exec.StepResult, len(values))
 	for _, value := range values {
-		out[value.StepID] = exec.StepResult{StepID: value.StepID, Capability: value.Capability, ToolID: value.ToolID, Content: value.Content, Receipt: value.Receipt, Action: value.Action, Duration: value.Duration, Attempts: value.Attempts, Fallbacks: value.Fallbacks, Skipped: value.Skipped, Input: append(json.RawMessage(nil), value.Input...)}
+		out[value.StepID] = exec.StepResult{StepID: value.StepID, RequestedCapability: value.RequestedCapability, Capability: value.Capability, ToolID: value.ToolID, Content: value.Content, Receipt: value.Receipt, Action: value.Action, Duration: value.Duration, Attempts: value.Attempts, Fallbacks: value.Fallbacks, Skipped: value.Skipped, ConditionUnknown: value.ConditionUnknown, Input: append(json.RawMessage(nil), value.Input...)}
 	}
 	return out
 }
@@ -733,11 +734,20 @@ func (r *runtime) resumeComplex(ctx context.Context, checkpointValue *checkpoint
 	actions := make([]contract.ActionReceipt, 0)
 	warnings := make([]contract.Warning, 0)
 	outcome := contract.OutcomeSuccess
-	var evidenceText strings.Builder
 	for _, result := range results {
 		if result.Skipped {
-			warnings = append(warnings, contract.Warning{Code: "STEP_SKIPPED", Message: "step condition was not met", StepID: result.StepID})
+			code, message := "STEP_SKIPPED", "step condition was not met"
+			if result.ConditionUnknown {
+				code, message = "CONDITION_UNKNOWN", "step condition could not be evaluated because its source value was unavailable"
+			}
+			warnings = append(warnings, contract.Warning{Code: code, Message: message, StepID: result.StepID})
 			continue
+		}
+		if result.Action != nil {
+			actions = append(actions, *result.Action)
+			if result.Action.Status != contract.ActionSuccess {
+				outcome = contract.OutcomeDegraded
+			}
 		}
 		if result.Err != nil {
 			outcome = contract.OutcomeDegraded
@@ -750,20 +760,14 @@ func (r *runtime) resumeComplex(ctx context.Context, checkpointValue *checkpoint
 			providerID = spec.Spec().ProviderID
 		}
 		now := time.Now().UTC()
-		evidence = append(evidence, Evidence{StepID: result.StepID, ToolID: result.ToolID, ProviderID: providerID, Data: result.Content, Content: result.Content, CapturedAt: now, SchemaValid: true})
-		if result.Action != nil {
-			actions = append(actions, *result.Action)
-			if result.Action.Status != contract.ActionSuccess {
-				outcome = contract.OutcomeDegraded
-			}
-		}
-		encoded, marshalErr := json.Marshal(result.Content)
-		if marshalErr != nil {
-			return nil, fmt.Errorf("resume: encode evidence for step %s: %w", result.StepID, marshalErr)
-		}
-		evidenceText.WriteString(result.StepID + ": " + string(encoded) + "\n")
+		evidence = append(evidence, Evidence{StepID: result.StepID, ToolID: result.ToolID, RequestedCapability: requestedCapability(result), ExecutedCapability: result.Capability, Status: "success", Receipt: result.Receipt, Attempts: result.Attempts, Fallbacks: result.Fallbacks, ProviderID: providerID, Data: result.Content, Content: result.Content, CapturedAt: now, SchemaValid: true})
 	}
-	input := model.ModelInput{Messages: []model.Message{{Role: model.RoleSystem, Content: "Answer using only the provided evidence. Do not claim an action succeeded without a receipt."}, {Role: model.RoleUser, Content: state.Request.Input + "\nEvidence:\n" + evidenceText.String()}}, ResponseFormat: runCfg.responseFormat, Options: cloneMetadata(runCfg.modelOptions)}
+	structuredEvidence := map[string]any{"goal": state.Request.Input, "outcome": outcome, "execution_facts": executionFacts(results), "evidence": evidence, "warnings": warnings, "actions": actions}
+	evidenceJSON, marshalErr := json.Marshal(structuredEvidence)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("resume: encode final evidence: %w", marshalErr)
+	}
+	input := model.ModelInput{Messages: []model.Message{{Role: model.RoleSystem, Content: "Answer using only the structured execution facts. step_id is only a plan node name and must never be described as a tool. tool_id is the only executed tool identity. A write action is complete only when status is success and it has a successful receipt. Never infer a missing or unknown value as false."}, {Role: model.RoleUser, Content: string(evidenceJSON)}}, ResponseFormat: runCfg.responseFormat, Options: cloneMetadata(runCfg.modelOptions)}
 	if err := model.ValidateCapabilities(counter.Capabilities(), input, false); err != nil {
 		return nil, err
 	}
@@ -1060,6 +1064,12 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 	}
 	var execution exec.ExecutionPlan
 	var results []exec.StepResult
+	completed := make(map[string]completedStep)
+	executionHistory := make([]exec.StepResult, 0)
+	requestedCapabilities := make(map[string]string, len(semantic.Steps))
+	for _, step := range semantic.Steps {
+		requestedCapabilities[step.ID] = step.Capability
+	}
 	replans := 0
 	maxReplans := r.cfg.budget.MaxReplans
 	if maxReplans <= 0 {
@@ -1076,6 +1086,11 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 		if r.cfg.budget.MaxBatches > 0 && len(execution.Batches) > r.cfg.budget.MaxBatches {
 			return nil, fmt.Errorf("budget: max batches exceeded")
 		}
+		for _, step := range execution.Steps {
+			if _, exists := requestedCapabilities[step.ID]; !exists {
+				requestedCapabilities[step.ID] = step.Capability
+			}
+		}
 		for _, batch := range execution.Batches {
 			r.emit(observe.Event{Type: "batch.started", RunID: runID, PlanVersion: semantic.Version, BatchIndex: batch.Index, Data: map[string]any{"steps": len(batch.Steps)}, Details: map[string]any{"step_definitions": batch.Steps}})
 			for _, step := range batch.Steps {
@@ -1086,7 +1101,9 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 		if parallel < 1 {
 			parallel = 4
 		}
-		scheduler := exec.Scheduler{Registry: registry, MaxParallel: parallel, Policy: r.cfg.failurePolicy, Observe: func(event policy.Event) {
+		fingerprints := executionFingerprints(execution)
+		reusable := reusableSteps(execution, fingerprints, completed)
+		scheduler := exec.Scheduler{Registry: registry, MaxParallel: parallel, Policy: r.cfg.failurePolicy, Completed: reusable, Observe: func(event policy.Event) {
 			r.emit(observe.Event{Type: event.Type, RunID: runID, PlanVersion: semantic.Version, ToolID: event.ToolID, Attempt: event.Attempt, Data: map[string]any{"fallback": event.Fallback, "error_kind": event.ErrorKind, "error": errString(event.Err)}})
 		}, Deadline: exec.DeadlinePolicy{TargetLatency: r.cfg.budget.TargetLatency, HardTimeout: r.cfg.budget.HardTimeout, OptionalCutoff: r.cfg.budget.OptionalCutoff}, Barrier: &exec.Barrier{}, Guard: func(ctx context.Context, value tool.Tool) error {
 			if r.cfg.guard == nil {
@@ -1097,6 +1114,20 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 		// Let the scheduler resolve inputs so bindings can use evidence from
 		// completed dependency steps.
 		results, err = scheduler.Run(ctx, execution, nil)
+		for index := range results {
+			result := results[index]
+			result.RequestedCapability = requestedCapabilities[result.StepID]
+			results[index] = result
+			if _, replayed := reusable[result.StepID]; !replayed {
+				executionHistory = append(executionHistory, result)
+			}
+			if result.Err == nil && !result.Skipped {
+				completed[result.StepID] = completedStep{Result: result, Fingerprint: fingerprints[result.StepID]}
+			}
+		}
+		if used, _, _, _, _ := stepStats(executionHistory); r.cfg.budget.MaxToolCalls > 0 && used > r.cfg.budget.MaxToolCalls {
+			return nil, fmt.Errorf("budget: max tool calls exceeded")
+		}
 		r.emitStepResults(runID, semantic.Version, results)
 		if pending, ok := confirmationPending(results); ok {
 			modelCalls, totalUsage := runCfg.counter.snapshot()
@@ -1111,6 +1142,12 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 				resp.Checkpoint = id
 			}
 			return resp, nil
+		}
+		if hasAmbiguousAction(results) {
+			// A write may already have happened. Never replan into another write or
+			// retry it automatically; compose a degraded response from the facts.
+			err = nil
+			break
 		}
 		if err == nil {
 			r.emit(observe.Event{Type: "plan.compiled", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"steps": len(semantic.Steps), "batches": len(execution.Batches)}})
@@ -1141,6 +1178,9 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 		if patchErr != nil {
 			return nil, fmt.Errorf("replan: execution failed: %v; replanner failed: %w", err, patchErr)
 		}
+		if compatibilityErr := plan.ValidatePatchCompatibility(semantic, patch, registry.ModelSpecs()); compatibilityErr != nil {
+			return nil, compatibilityErr
+		}
 		semantic, err = patch.Apply(semantic)
 		if err != nil {
 			return nil, err
@@ -1152,13 +1192,37 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 		r.emit(observe.Event{Type: "replan.completed", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"version": semantic.Version, "replans": replans}, Details: map[string]any{"patch": patch, "plan": semantic}})
 	}
 	evidence := make([]Evidence, 0, len(results))
-	var evidenceText strings.Builder
 	warnings := make([]contract.Warning, 0)
 	outcome := contract.OutcomeSuccess
+	currentSuccess := make(map[string]bool, len(results))
+	for _, result := range results {
+		currentSuccess[result.StepID] = result.Err == nil && !result.Skipped
+	}
+	for _, historical := range executionHistory {
+		if historical.Err != nil && !currentSuccess[historical.StepID] {
+			outcome = contract.OutcomeDegraded
+			warnings = append(warnings, contract.Warning{Code: "STEP_FAILED_REPLANNED", Message: historical.Err.Error(), StepID: historical.StepID, Metadata: map[string]any{"tool_id": historical.ToolID, "capability": historical.Capability, "attempts": historical.Attempts}})
+		}
+	}
 	for _, result := range results {
 		if result.Skipped {
-			warnings = append(warnings, contract.Warning{Code: "STEP_SKIPPED", Message: "step condition was not met", StepID: result.StepID})
+			code, message := "STEP_SKIPPED", "step condition was not met"
+			if result.ConditionUnknown {
+				code, message = "CONDITION_UNKNOWN", "step condition could not be evaluated because its source value was unavailable"
+			}
+			warnings = append(warnings, contract.Warning{Code: code, Message: message, StepID: result.StepID})
 			continue
+		}
+		if result.Action != nil {
+			actions = append(actions, *result.Action)
+			if result.Action.Status != contract.ActionSuccess {
+				outcome = contract.OutcomeDegraded
+				code := "ACTION_NOT_COMPLETED"
+				if result.Action.Status == contract.ActionUnknown {
+					code = "AMBIGUOUS_SIDE_EFFECT"
+				}
+				warnings = append(warnings, contract.Warning{Code: code, Message: result.Action.Message, StepID: result.StepID})
+			}
 		}
 		if result.Err != nil {
 			outcome = contract.OutcomeDegraded
@@ -1170,25 +1234,15 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 			providerID = value.Spec().ProviderID
 		}
 		now := time.Now().UTC()
-		evidence = append(evidence, Evidence{StepID: result.StepID, ToolID: result.ToolID, ProviderID: providerID, Data: result.Content, Content: result.Content, CapturedAt: now, SchemaValid: true})
-		if result.Action != nil {
-			actions = append(actions, *result.Action)
-			if result.Action.Status == contract.ActionConfirmationRequired || result.Action.Status == contract.ActionUnknown {
-				outcome = contract.OutcomeDegraded
-				code := "CONFIRMATION_REQUIRED"
-				if result.Action.Status == contract.ActionUnknown {
-					code = "AMBIGUOUS_SIDE_EFFECT"
-				}
-				warnings = append(warnings, contract.Warning{Code: code, Message: result.Action.Message, StepID: result.StepID})
-			}
-		}
-		b, marshalErr := json.Marshal(result.Content)
-		if marshalErr != nil {
-			return nil, fmt.Errorf("step %s result: %w", result.StepID, marshalErr)
-		}
-		evidenceText.WriteString(result.StepID + ": " + string(b) + "\n")
+		status := "success"
+		evidence = append(evidence, Evidence{StepID: result.StepID, ToolID: result.ToolID, RequestedCapability: requestedCapability(result), ExecutedCapability: result.Capability, Status: status, Receipt: result.Receipt, Attempts: result.Attempts, Fallbacks: result.Fallbacks, ProviderID: providerID, Data: result.Content, Content: result.Content, CapturedAt: now, SchemaValid: true})
 	}
-	finalInput := model.ModelInput{Messages: []model.Message{{Role: model.RoleSystem, Content: "Answer using only the provided evidence. Do not claim an action succeeded without a receipt."}, {Role: model.RoleUser, Content: req.Input + "\nEvidence:\n" + evidenceText.String()}}, ResponseFormat: runCfg.responseFormat, Options: cloneMetadata(runCfg.modelOptions)}
+	structuredEvidence := map[string]any{"goal": req.Input, "outcome": outcome, "execution_facts": executionFacts(executionHistory), "evidence": evidence, "warnings": warnings, "actions": actions}
+	evidenceJSON, marshalErr := json.Marshal(structuredEvidence)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("final composer evidence: %w", marshalErr)
+	}
+	finalInput := model.ModelInput{Messages: []model.Message{{Role: model.RoleSystem, Content: "Answer using only the structured execution facts. step_id is only a plan node name and must never be described as a tool. tool_id is the only executed tool identity. A write action is complete only when status is success and it has a successful receipt. Never infer a missing or unknown value as false."}, {Role: model.RoleUser, Content: string(evidenceJSON)}}, ResponseFormat: runCfg.responseFormat, Options: cloneMetadata(runCfg.modelOptions)}
 	r.emit(observe.Event{Type: "final_composer.started", RunID: runID, Details: map[string]any{"messages": finalInput.Messages}})
 	final, err := runCfg.model.Generate(ctx, finalInput)
 	if err != nil {
@@ -1202,9 +1256,85 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 	}
 	r.emit(observe.Event{Type: "final_composer.completed", RunID: runID, Data: map[string]any{"total_tokens": final.Usage.TotalTokens}, Details: map[string]any{"content": final.Text}})
 	modelCalls, totalUsage := runCfg.counter.snapshot()
-	toolCalls, successful, failed, retries, fallbacks := stepStats(results)
+	toolCalls, successful, failed, retries, fallbacks := stepStats(executionHistory)
 	stats := contract.RunStats{ModelCalls: modelCalls, ToolCalls: toolCalls, SuccessfulTools: successful, FailedTools: failed, Retries: retries, Fallbacks: fallbacks, PlanSteps: len(semantic.Steps), Batches: len(execution.Batches), Replans: replans, Duration: time.Since(started), TotalTokens: totalUsage.TotalTokens, PromptTokens: totalUsage.PromptTokens, CompletionTokens: totalUsage.CompletionTokens}
 	return &Response{RunID: runID, Text: final.Text, FinishReason: final.FinishReason, Usage: totalUsage, Outcome: outcome, Stats: stats, Warnings: warnings, ToolCalls: toolCalls, Evidence: evidence, PlanSteps: len(semantic.Steps), Batches: len(execution.Batches), Replans: replans, Actions: actions}, nil
+}
+
+type completedStep struct {
+	Result      exec.StepResult
+	Fingerprint string
+}
+
+func executionFingerprints(execution exec.ExecutionPlan) map[string]string {
+	out := make(map[string]string, len(execution.Steps))
+	for _, step := range execution.Steps {
+		encoded, _ := json.Marshal(step)
+		digest := sha256.Sum256(encoded)
+		out[step.ID] = hex.EncodeToString(digest[:])
+	}
+	return out
+}
+
+func reusableSteps(execution exec.ExecutionPlan, fingerprints map[string]string, completed map[string]completedStep) map[string]exec.StepResult {
+	out := make(map[string]exec.StepResult)
+	for _, step := range execution.Steps {
+		stored, ok := completed[step.ID]
+		if !ok || stored.Fingerprint != fingerprints[step.ID] {
+			continue
+		}
+		dependenciesReusable := true
+		for _, dependency := range step.DependsOn {
+			if _, ok := out[dependency]; !ok {
+				dependenciesReusable = false
+				break
+			}
+		}
+		if dependenciesReusable {
+			out[step.ID] = stored.Result
+		}
+	}
+	return out
+}
+
+func hasAmbiguousAction(results []exec.StepResult) bool {
+	for _, result := range results {
+		if result.Action != nil && result.Action.Status == contract.ActionUnknown {
+			return true
+		}
+	}
+	return false
+}
+
+func executionFacts(results []exec.StepResult) []map[string]any {
+	out := make([]map[string]any, 0, len(results))
+	for _, result := range results {
+		status := "success"
+		if result.Skipped {
+			status = "skipped"
+		} else if result.Err != nil {
+			status = "failed"
+		}
+		fact := map[string]any{"step_id": result.StepID, "requested_capability": requestedCapability(result), "executed_capability": result.Capability, "tool_id": result.ToolID, "status": status, "attempts": result.Attempts, "fallbacks": result.Fallbacks, "receipt": result.Receipt}
+		if result.Err != nil {
+			fact["error"] = result.Err.Error()
+		}
+		if result.ConditionUnknown {
+			fact["condition"] = "unknown"
+		}
+		if result.Action != nil {
+			fact["action"] = result.Action
+		}
+		out = append(out, fact)
+	}
+	return out
+}
+
+func requestedCapability(result exec.StepResult) string {
+	if result.RequestedCapability != "" {
+		return result.RequestedCapability
+	}
+	return result.Capability
 }
 
 func stepStats(results []exec.StepResult) (toolCalls, successful, failed, retries, fallbacks int) {
@@ -1216,17 +1346,16 @@ func stepStats(results []exec.StepResult) (toolCalls, successful, failed, retrie
 			continue
 		}
 		calls := result.Attempts
-		if calls == 0 && result.ModelCalls == 0 {
-			calls = 1
-		}
 		toolCalls += calls
-		if result.Err == nil {
-			successful += calls
+		if result.Err == nil && calls > 0 {
+			successful++
+			failed += calls - 1
 		} else {
 			failed += calls
 		}
-		if calls > 1 {
-			retries += calls - 1
+		candidateCalls := result.Fallbacks + 1
+		if calls > candidateCalls {
+			retries += calls - candidateCalls
 		}
 		fallbacks += result.Fallbacks
 	}
@@ -1272,11 +1401,12 @@ func (r *runtime) emitStepResults(runID string, planVersion int, results []exec.
 			StepID:      result.StepID,
 			ToolID:      result.ToolID,
 			Data: map[string]any{
-				"capability":  result.Capability,
-				"attempts":    result.Attempts,
-				"fallbacks":   result.Fallbacks,
-				"duration_ms": result.Duration.Milliseconds(),
-				"error":       errString(result.Err),
+				"requested_capability": requestedCapability(result),
+				"executed_capability":  result.Capability,
+				"attempts":             result.Attempts,
+				"fallbacks":            result.Fallbacks,
+				"duration_ms":          result.Duration.Milliseconds(),
+				"error":                errString(result.Err),
 			},
 			Details: map[string]any{"input": result.Input, "output": result.Content},
 		})

@@ -193,3 +193,33 @@ func TestComplexFailureEmitsRunFailedOnce(t *testing.T) {
 		t.Fatalf("expected one run.failed event, got %d", failedEvents)
 	}
 }
+
+type removeFailedReplanner struct{}
+
+func (removeFailedReplanner) Replan(context.Context, plan.Input) (plan.Patch, error) {
+	return plan.Patch{Remove: []string{"fail"}}, nil
+}
+
+func TestComplexReplanReusesSuccessfulStep(t *testing.T) {
+	reads, failures := 0, 0
+	read := tool.Func("read", "read", func(context.Context, struct{}) (string, error) {
+		reads++
+		return "ok", nil
+	}, tool.WithCapabilities("state.read"))
+	fail := tool.Func("fail", "fail", func(context.Context, struct{}) (string, error) {
+		failures++
+		return "", errors.New("permanent failure")
+	}, tool.WithCapabilities("state.fail"))
+	planner := plannerFunc(func(context.Context, string, []model.ToolSpec) (plan.Plan, error) {
+		return plan.Plan{Version: 1, Steps: []plan.Step{{ID: "read", Capability: "state.read"}, {ID: "fail", Capability: "state.fail"}}}, nil
+	})
+	mode := RunModeAgentComplex
+	a, err := New(WithModel(&complexModel{}), WithTools(read, fail), WithPlanner(planner), WithReplanner(removeFailedReplanner{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := a.Run(context.Background(), Request{Input: "run", Mode: &mode})
+	if err != nil || reads != 1 || failures != 1 || out.Stats.ToolCalls != 2 || out.Stats.SuccessfulTools != 1 || out.Stats.FailedTools != 1 {
+		t.Fatalf("successful step was repeated or stats lost: out=%+v err=%v reads=%d failures=%d", out, err, reads, failures)
+	}
+}

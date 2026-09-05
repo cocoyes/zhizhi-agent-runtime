@@ -66,10 +66,20 @@ type Event struct {
 	Err       error
 }
 type Result struct {
-	ToolID    string
-	Value     tool.Result
-	Attempts  int
-	Fallbacks int
+	ToolID      string
+	Value       tool.Result
+	Attempts    int
+	Fallbacks   int
+	AttemptsLog []AttemptRecord
+	ErrorKind   ErrorKind
+}
+
+type AttemptRecord struct {
+	ToolID   string
+	Attempt  int
+	Started  time.Time
+	Duration time.Duration
+	Error    string
 }
 
 func (r Runner) Execute(ctx context.Context, candidates []tool.Tool, payload []byte) (Result, error) {
@@ -85,6 +95,11 @@ func (r Runner) Execute(ctx context.Context, candidates []tool.Tool, payload []b
 		backoff = 20 * time.Millisecond
 	}
 	lastErr := error(nil)
+	lastToolID := ""
+	totalAttempts := 0
+	lastFallback := 0
+	lastKind := ErrorKind("")
+	records := make([]AttemptRecord, 0)
 	for candidateIndex, candidate := range candidates {
 		if candidateIndex > 0 && r.OnEvent != nil {
 			r.OnEvent(Event{Type: "tool.fallback", ToolID: candidate.Spec().ID, Fallback: candidateIndex})
@@ -92,18 +107,35 @@ func (r Runner) Execute(ctx context.Context, candidates []tool.Tool, payload []b
 		attempts := 0
 		for attempts < maxAttempts {
 			attempts++
+			totalAttempts++
+			lastToolID = candidate.Spec().ID
+			lastFallback = candidateIndex
+			started := time.Now()
 			if r.BeforeCall != nil {
 				if err := r.BeforeCall(candidate); err != nil {
 					lastErr = err
+					records = append(records, AttemptRecord{ToolID: lastToolID, Attempt: attempts, Started: started, Duration: time.Since(started), Error: err.Error()})
 					break
 				}
 			}
 			value, err := candidate.Call(ctx, payload)
 			if err == nil {
-				return Result{ToolID: candidate.Spec().ID, Value: value, Attempts: attempts, Fallbacks: candidateIndex}, nil
+				records = append(records, AttemptRecord{ToolID: lastToolID, Attempt: attempts, Started: started, Duration: time.Since(started)})
+				return Result{ToolID: lastToolID, Value: value, Attempts: totalAttempts, Fallbacks: candidateIndex, AttemptsLog: records}, nil
 			}
 			lastErr = err
+			records = append(records, AttemptRecord{ToolID: lastToolID, Attempt: attempts, Started: started, Duration: time.Since(started), Error: err.Error()})
 			decision := Classify(err)
+			lastKind = decision.Kind
+			// A transport-style failure after invoking a write cannot establish
+			// whether the external effect happened. Treat it as ambiguous even if
+			// the same error would be merely transient for a read.
+			if candidate.Spec().IsWrite() && decision.Kind == Transient {
+				lastKind = Ambiguous
+			}
+			if lastKind == Ambiguous {
+				return Result{ToolID: lastToolID, Attempts: totalAttempts, Fallbacks: candidateIndex, AttemptsLog: records, ErrorKind: lastKind}, lastErr
+			}
 			if !retryClassAllowed(decision.Kind, r.Config.RetryOn) {
 				break
 			}
@@ -126,14 +158,14 @@ func (r Runner) Execute(ctx context.Context, candidates []tool.Tool, payload []b
 			case <-timer.C:
 			case <-ctx.Done():
 				timer.Stop()
-				return Result{ToolID: candidate.Spec().ID, Attempts: attempts}, ctx.Err()
+				return Result{ToolID: lastToolID, Attempts: totalAttempts, Fallbacks: candidateIndex, AttemptsLog: records, ErrorKind: lastKind}, ctx.Err()
 			}
 			if backoff < time.Second {
 				backoff *= 2
 			}
 		}
 	}
-	return Result{}, lastErr
+	return Result{ToolID: lastToolID, Attempts: totalAttempts, Fallbacks: lastFallback, AttemptsLog: records, ErrorKind: lastKind}, lastErr
 }
 
 func retryClassAllowed(kind ErrorKind, allowed []ErrorKind) bool {

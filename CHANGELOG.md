@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.0.5 - 2026-09-05
+
+- Added deterministic semantic compatibility checks for replanned capability
+  replacements, backed by explicit semantic groups and fallback allowlists.
+- Preserved successful step results across replans and prevented ambiguous
+  writes from being retried, replaced, or reported as completed.
+- Made execution evidence distinguish plan step IDs, requested and executed
+  capabilities, actual tool IDs, receipts, attempts, and fallback counts.
+- Added unknown-safe conditional execution and schema validation for condition
+  source paths and value types.
+
+## 1.0.4 - 2026-09-05
+
 - Completed the P0 execution contract: multimodal messages, named/required tool
   choice, JSON Schema response formats, per-run tools/options, model/tool/
   planner/replanner/agent middleware, bounded agentic steps, unified lifecycle

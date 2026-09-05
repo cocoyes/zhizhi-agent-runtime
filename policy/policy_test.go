@@ -60,3 +60,28 @@ func TestRetryOnRestrictsFailureClasses(t *testing.T) {
 		t.Fatalf("unexpected retries for disallowed class: %d", attempts)
 	}
 }
+
+func TestFailurePreservesInvocationMetadata(t *testing.T) {
+	v := tool.Func("broken", "broken", func(context.Context, struct{}) (string, error) {
+		return "", errors.New("permanent failure")
+	})
+	out, err := (Runner{Config: Config{MaxAttempts: 1}}).Execute(context.Background(), []tool.Tool{v}, []byte(`{}`))
+	if err == nil || out.ToolID != "broken" || out.Attempts != 1 || len(out.AttemptsLog) != 1 {
+		t.Fatalf("lost failed invocation metadata: out=%+v err=%v", out, err)
+	}
+}
+
+func TestAmbiguousFailureDoesNotFallback(t *testing.T) {
+	secondCalled := false
+	first := tool.Func("first", "first", func(context.Context, struct{}) (string, error) {
+		return "", errors.New("connection lost after write; unknown effect")
+	})
+	second := tool.Func("second", "second", func(context.Context, struct{}) (string, error) {
+		secondCalled = true
+		return "ok", nil
+	})
+	out, err := (Runner{Config: Config{MaxAttempts: 1}}).Execute(context.Background(), []tool.Tool{first, second}, []byte(`{}`))
+	if err == nil || secondCalled || out.ToolID != "first" || out.Attempts != 1 {
+		t.Fatalf("ambiguous call fell back: out=%+v err=%v second=%v", out, err, secondCalled)
+	}
+}

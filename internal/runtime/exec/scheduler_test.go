@@ -9,6 +9,7 @@ import (
 
 	"github.com/cocoyes/zhizhi-agent-runtime/contract"
 	"github.com/cocoyes/zhizhi-agent-runtime/plan"
+	"github.com/cocoyes/zhizhi-agent-runtime/policy"
 	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 	"go.uber.org/goleak"
 )
@@ -114,6 +115,28 @@ func TestSchedulerExecutesNotEqualsCondition(t *testing.T) {
 	}
 }
 
+func TestSchedulerTreatsMissingConditionValueAsUnknown(t *testing.T) {
+	called := false
+	lookup := tool.Func("lookup", "lookup", func(context.Context, struct{}) (map[string]any, error) {
+		return map[string]any{"found": false}, nil
+	}, tool.WithCapabilities("lookup"))
+	write := tool.Func("write", "write", func(context.Context, struct{}) (string, error) {
+		called = true
+		return "done", nil
+	}, tool.WithCapabilities("write"))
+	execution, err := Compile(plan.Plan{Steps: []plan.Step{
+		{ID: "lookup", Capability: "lookup"},
+		{ID: "write", Capability: "write", DependsOn: []string{"lookup"}, Condition: &plan.Condition{SourceStep: "lookup", SourcePath: "location", NotEquals: "drawer"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := (Scheduler{Registry: tool.NewRegistry(lookup, write)}).Run(context.Background(), execution, nil)
+	if err != nil || called || len(results) != 2 || !results[1].Skipped || !results[1].ConditionUnknown {
+		t.Fatalf("unknown condition was treated as true: results=%+v err=%v called=%v", results, err, called)
+	}
+}
+
 func TestSchedulerRequiresConfirmationBeforeWrite(t *testing.T) {
 	called := false
 	write := tool.Func("write", "write", func(context.Context, struct{}) (string, error) {
@@ -127,5 +150,24 @@ func TestSchedulerRequiresConfirmationBeforeWrite(t *testing.T) {
 	results, err := (Scheduler{Registry: tool.NewRegistry(write), Confirm: func(context.Context, tool.Spec, json.RawMessage) (bool, error) { return false, nil }}).Run(context.Background(), execution, nil)
 	if err != nil || len(results) != 1 || called || results[0].Action == nil || results[0].Action.Status != contract.ActionConfirmationRequired {
 		t.Fatalf("confirmation gate failed: %+v err=%v called=%v", results, err, called)
+	}
+}
+
+func TestSchedulerMarksTimedOutWriteAmbiguousAndDoesNotFallback(t *testing.T) {
+	backupCalled := false
+	first := tool.Func("a_write", "write", func(context.Context, struct{}) (string, error) {
+		return "", errors.New("network timeout")
+	}, tool.WithCapabilities("record.create"), tool.WithSideEffect(tool.SideEffectWriteNonIdempotent), tool.WithIdempotency(tool.IdempotencyNonIdempotent))
+	backup := tool.Func("b_write", "backup", func(context.Context, struct{}) (string, error) {
+		backupCalled = true
+		return "created", nil
+	}, tool.WithCapabilities("record.create"), tool.WithSideEffect(tool.SideEffectWriteNonIdempotent), tool.WithIdempotency(tool.IdempotencyNonIdempotent))
+	execution, err := Compile(plan.Plan{Steps: []plan.Step{{ID: "create", Capability: "record.create"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := (Scheduler{Registry: tool.NewRegistry(first, backup), Policy: policy.Runner{Config: policy.Config{MaxAttempts: 1}}}).Run(context.Background(), execution, nil)
+	if err == nil || backupCalled || len(results) != 1 || results[0].ToolID != "a_write" || results[0].Attempts != 1 || results[0].Action == nil || results[0].Action.Status != contract.ActionUnknown {
+		t.Fatalf("ambiguous write was retried/fell back or lost: results=%+v err=%v backup=%v", results, err, backupCalled)
 	}
 }

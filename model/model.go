@@ -116,26 +116,38 @@ type ToolSpec struct {
 	Capabilities []string     `json:"-"`
 	// OutputSchema is runtime planning metadata and is never serialized into
 	// the provider's function-tool wire object.
-	OutputSchema json.RawMessage `json:"-"`
+	OutputSchema  json.RawMessage `json:"-"`
+	SemanticGroup string          `json:"-"`
+	Fallbacks     []string        `json:"-"`
+	SideEffect    string          `json:"-"`
+	Idempotency   string          `json:"-"`
 }
 
 type PlanningToolSpec struct {
-	Name         string          `json:"name"`
-	Description  string          `json:"description,omitempty"`
-	Capabilities []string        `json:"capabilities,omitempty"`
-	InputSchema  json.RawMessage `json:"input_schema,omitempty"`
-	OutputSchema json.RawMessage `json:"output_schema,omitempty"`
+	Name          string          `json:"name"`
+	Description   string          `json:"description,omitempty"`
+	Capabilities  []string        `json:"capabilities,omitempty"`
+	InputSchema   json.RawMessage `json:"input_schema,omitempty"`
+	OutputSchema  json.RawMessage `json:"output_schema,omitempty"`
+	SemanticGroup string          `json:"semantic_group,omitempty"`
+	Fallbacks     []string        `json:"fallbacks,omitempty"`
+	SideEffect    string          `json:"side_effect,omitempty"`
+	Idempotency   string          `json:"idempotency,omitempty"`
 }
 
 func PlanningToolCatalog(tools []ToolSpec) []PlanningToolSpec {
 	catalog := make([]PlanningToolSpec, 0, len(tools))
 	for _, value := range tools {
 		catalog = append(catalog, PlanningToolSpec{
-			Name:         value.Function.Name,
-			Description:  value.Function.Description,
-			Capabilities: append([]string(nil), value.Capabilities...),
-			InputSchema:  value.Function.Parameters,
-			OutputSchema: value.OutputSchema,
+			Name:          value.Function.Name,
+			Description:   value.Function.Description,
+			Capabilities:  append([]string(nil), value.Capabilities...),
+			InputSchema:   value.Function.Parameters,
+			OutputSchema:  value.OutputSchema,
+			SemanticGroup: value.SemanticGroup,
+			Fallbacks:     append([]string(nil), value.Fallbacks...),
+			SideEffect:    value.SideEffect,
+			Idempotency:   value.Idempotency,
 		})
 	}
 	return catalog

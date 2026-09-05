@@ -111,3 +111,27 @@ func TestModelReplannerRepairsEmptyPatchInsteadOfReusingPlan(t *testing.T) {
 		t.Fatalf("expected a repaired non-empty patch after two calls: patch=%+v calls=%d err=%v", patch, m.calls, err)
 	}
 }
+
+func TestValidatePatchCompatibilityRejectsUnrelatedCapability(t *testing.T) {
+	source := Plan{Steps: []Step{{ID: "create", Capability: "reminder.create"}}}
+	patch := Patch{Replace: []Step{{ID: "create", Capability: "web.search"}}}
+	tools := []model.ToolSpec{
+		{Function: model.FunctionSpec{Name: "reminder", Parameters: json.RawMessage(`{"type":"object"}`)}, Capabilities: []string{"reminder.create"}, SemanticGroup: "reminder", Fallbacks: []string{"reminder.create.backup"}, SideEffect: "write_non_idempotent"},
+		{Function: model.FunctionSpec{Name: "search", Parameters: json.RawMessage(`{"type":"object"}`)}, Capabilities: []string{"web.search"}, SemanticGroup: "search", SideEffect: "read"},
+	}
+	if err := ValidatePatchCompatibility(source, patch, tools); err == nil {
+		t.Fatal("expected incompatible replacement to be rejected")
+	}
+}
+
+func TestValidatePatchCompatibilityAllowsExplicitSameGroupFallback(t *testing.T) {
+	source := Plan{Steps: []Step{{ID: "create", Capability: "reminder.create"}}}
+	patch := Patch{Replace: []Step{{ID: "create", Capability: "reminder.create.backup"}}}
+	tools := []model.ToolSpec{
+		{Function: model.FunctionSpec{Name: "reminder", Parameters: json.RawMessage(`{"type":"object"}`)}, Capabilities: []string{"reminder.create"}, SemanticGroup: "reminder", Fallbacks: []string{"reminder.create.backup"}, SideEffect: "write_non_idempotent"},
+		{Function: model.FunctionSpec{Name: "reminder_backup", Parameters: json.RawMessage(`{"type":"object"}`)}, Capabilities: []string{"reminder.create.backup"}, SemanticGroup: "reminder", SideEffect: "write_non_idempotent"},
+	}
+	if err := ValidatePatchCompatibility(source, patch, tools); err != nil {
+		t.Fatalf("explicit fallback rejected: %v", err)
+	}
+}

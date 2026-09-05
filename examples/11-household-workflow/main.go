@@ -24,7 +24,7 @@ type searchInput struct {
 }
 
 type searchOutput struct {
-	Result string `json:"result" jsonschema:"enum=抽屉,enum=其他,description=搜索得到的位置分类"`
+	Result string `json:"result" jsonschema:"description=搜索得到的位置分类"`
 }
 
 type notifyInput struct {
@@ -93,8 +93,8 @@ func newDemoTools(state *demoState) []tool.Tool {
 		if err := wait(ctx, 80*time.Millisecond); err != nil {
 			return searchOutput{}, err
 		}
-		fmt.Printf("[search] %s -> 抽屉\n", in.Query)
-		return searchOutput{Result: "抽屉"}, nil
+		fmt.Printf("[search] %s -> 柜子\n", in.Query)
+		return searchOutput{Result: "柜子"}, nil
 	}, tool.WithCapabilities("search"))
 
 	notify := tool.Func("notify", "创建定时通知；支持跨设备的 cloud 通道和无需联网的 local 通道，未指定时使用 cloud。", func(_ context.Context, in notifyInput) (notifyOutput, error) {

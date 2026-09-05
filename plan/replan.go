@@ -96,6 +96,47 @@ func (p Patch) Apply(source Plan) (Plan, error) {
 	return out.Normalize()
 }
 
+// ValidatePatchCompatibility rejects semantic substitutions that the catalog
+// has not explicitly authorized. A model-generated patch is never itself
+// evidence that two capabilities are interchangeable.
+func ValidatePatchCompatibility(source Plan, patch Patch, tools []model.ToolSpec) error {
+	if len(tools) == 0 {
+		return nil
+	}
+	before := make(map[string]Step, len(source.Steps))
+	for _, step := range source.Steps {
+		before[step.ID] = step
+	}
+	for _, replacement := range patch.Replace {
+		original, ok := before[replacement.ID]
+		if !ok || original.Capability == replacement.Capability {
+			continue
+		}
+		from, fromOK := findTool(tools, original.Capability)
+		to, toOK := findTool(tools, replacement.Capability)
+		if !fromOK || !toOK || from.SemanticGroup == "" || from.SemanticGroup != to.SemanticGroup || !containsCapability(from.Fallbacks, replacement.Capability, to.Function.Name) || weakensEffect(from.SideEffect, to.SideEffect) {
+			return fmt.Errorf("REPLAN_INCOMPATIBLE_CAPABILITY_REPLACEMENT: step %q cannot replace capability %q with incompatible capability %q", replacement.ID, original.Capability, replacement.Capability)
+		}
+	}
+	return nil
+}
+
+func containsCapability(values []string, capability, toolID string) bool {
+	for _, value := range values {
+		if value == capability || value == toolID {
+			return true
+		}
+	}
+	return false
+}
+
+func weakensEffect(before, after string) bool {
+	isWrite := func(value string) bool {
+		return value == "write" || value == "write_idempotent" || value == "write_non_idempotent" || value == "destructive"
+	}
+	return isWrite(before) && !isWrite(after)
+}
+
 type ModelReplanner struct {
 	Model  model.Model
 	Prompt string
@@ -145,6 +186,9 @@ func (r *ModelReplanner) Replan(ctx context.Context, input Input) (Patch, error)
 		decodeErr := candidateErr
 		if decodeErr == nil {
 			patch, decodeErr = decodePatch(candidate)
+		}
+		if decodeErr == nil {
+			decodeErr = ValidatePatchCompatibility(input.Original, patch, input.Tools)
 		}
 		if decodeErr == nil {
 			var patched Plan

@@ -21,17 +21,23 @@ type Warning struct {
 }
 
 type Evidence struct {
-	ID          string         `json:"id,omitempty"`
-	StepID      string         `json:"step_id,omitempty"`
-	ProviderID  string         `json:"provider_id,omitempty"`
-	ToolID      string         `json:"tool_id,omitempty"`
-	Data        any            `json:"data,omitempty"`
-	Content     any            `json:"content,omitempty"` // Compatibility alias for early SDK releases.
-	CapturedAt  time.Time      `json:"captured_at"`
-	FreshUntil  *time.Time     `json:"fresh_until,omitempty"`
-	TrustLevel  string         `json:"trust_level,omitempty"`
-	SchemaValid bool           `json:"schema_valid"`
-	Metadata    map[string]any `json:"metadata,omitempty"`
+	ID                  string         `json:"id,omitempty"`
+	StepID              string         `json:"step_id,omitempty"`
+	ProviderID          string         `json:"provider_id,omitempty"`
+	ToolID              string         `json:"tool_id,omitempty"`
+	RequestedCapability string         `json:"requested_capability,omitempty"`
+	ExecutedCapability  string         `json:"executed_capability,omitempty"`
+	Status              string         `json:"status,omitempty"`
+	Receipt             bool           `json:"receipt,omitempty"`
+	Attempts            int            `json:"attempts,omitempty"`
+	Fallbacks           int            `json:"fallbacks,omitempty"`
+	Data                any            `json:"data,omitempty"`
+	Content             any            `json:"content,omitempty"` // Compatibility alias for early SDK releases.
+	CapturedAt          time.Time      `json:"captured_at"`
+	FreshUntil          *time.Time     `json:"fresh_until,omitempty"`
+	TrustLevel          string         `json:"trust_level,omitempty"`
+	SchemaValid         bool           `json:"schema_valid"`
+	Metadata            map[string]any `json:"metadata,omitempty"`
 }
 
 type ActionStatus string
