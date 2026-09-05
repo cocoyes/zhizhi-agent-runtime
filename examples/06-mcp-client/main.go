@@ -26,7 +26,7 @@ func main() {
 		APIKey:          os.Getenv("LLM_API_KEY"),
 		Model:           os.Getenv("LLM_MODEL"),
 		Thinking:        envOr("LLM_THINKING", openaicompat.ThinkingDisabled),
-		ReasoningEffort: envOr("LLM_REASONING_EFFORT", "high"),
+		ReasoningEffort: os.Getenv("LLM_REASONING_EFFORT"),
 	})
 	amapEndpoint := os.Getenv("AMAP_MCP_URL")
 	if amapEndpoint == "" {

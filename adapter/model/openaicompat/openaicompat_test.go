@@ -125,18 +125,18 @@ func TestGenerateSendsThinkingDisabled(t *testing.T) {
 	}
 }
 
-func TestGenerateUsesDefaultThinkingOptions(t *testing.T) {
+func TestGenerateDefaultsThinkingAndOmitsReasoningEffort(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var request struct {
-			Thinking struct {
-				Type string `json:"type"`
-			} `json:"thinking"`
-			ReasoningEffort string `json:"reasoning_effort"`
-		}
+		var request map[string]json.RawMessage
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatal(err)
 		}
-		if request.Thinking.Type != ThinkingDisabled || request.ReasoningEffort != "high" {
+		var thinking thinkingConfig
+		if err := json.Unmarshal(request["thinking"], &thinking); err != nil {
+			t.Fatal(err)
+		}
+		_, hasReasoningEffort := request["reasoning_effort"]
+		if thinking.Type != ThinkingDisabled || hasReasoningEffort {
 			t.Fatalf("default thinking options missing from wire request: %+v", request)
 		}
 		w.Header().Set("Content-Type", "application/json")

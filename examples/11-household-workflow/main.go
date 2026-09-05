@@ -135,9 +135,6 @@ func newDemoAgent(state *demoState, observer observe.Observer) (zhizhi.Agent, er
 		thinking = openaicompat.ThinkingDisabled
 	}
 	reasoningEffort := os.Getenv("LLM_REASONING_EFFORT")
-	if reasoningEffort == "" {
-		reasoningEffort = "high"
-	}
 	modelClient := openaicompat.New(openaicompat.Config{
 		BaseURL:         os.Getenv("LLM_BASE_URL"),
 		APIKey:          os.Getenv("LLM_API_KEY"),

@@ -27,7 +27,7 @@ type Config struct {
 	// defaults to ThinkingDisabled.
 	Thinking string
 	// ReasoningEffort is sent as the top-level reasoning_effort field. An empty
-	// value defaults to "high".
+	// value leaves the field unset so the caller/provider controls the default.
 	ReasoningEffort string
 	Capabilities    *model.ModelCapabilities
 	MaxBodySize     int64
@@ -50,9 +50,6 @@ func New(cfg Config) *Client {
 	}
 	if cfg.Thinking == "" {
 		cfg.Thinking = ThinkingDisabled
-	}
-	if cfg.ReasoningEffort == "" {
-		cfg.ReasoningEffort = "high"
 	}
 	c := cfg.Client
 	if c == nil {

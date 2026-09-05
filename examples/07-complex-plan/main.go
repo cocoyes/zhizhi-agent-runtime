@@ -21,9 +21,6 @@ func main() {
 		thinking = openaicompat.ThinkingDisabled
 	}
 	reasoningEffort := os.Getenv("LLM_REASONING_EFFORT")
-	if reasoningEffort == "" {
-		reasoningEffort = "high"
-	}
 	a, err := zhizhi.New(zhizhi.WithModel(
 		openaicompat.New(openaicompat.Config{BaseURL: os.Getenv("LLM_BASE_URL"),
 			APIKey:          os.Getenv("LLM_API_KEY"),
