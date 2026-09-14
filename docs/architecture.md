@@ -11,6 +11,7 @@ zhizhi（Agent 门面、配置、运行入口）
     ↓
 公共能力与扩展点
     ├── model / tool / plan
+    ├── speech / adapter/speech
     ├── observe / middleware
     ├── checkpoint / policy / route
     ├── mcp / adapter
@@ -29,6 +30,7 @@ internal
 | 包 | 职责 | 保持公开的理由 |
 | --- | --- | --- |
 | `model` | 模型协议和流 | 自定义模型适配器的必要接口 |
+| `speech` | 实时双工语音会话协议 | WebSocket 长连接与普通 LLM 请求生命周期不同，需要独立扩展点 |
 | `tool` | 工具、注册表、能力解析 | 业务工具的主要编程面 |
 | `plan` | 计划模型、规划与重规划 | 自定义 Planner/Replanner 的扩展点 |
 | `observe` | 事件与追踪 | 可观测性接入点 |

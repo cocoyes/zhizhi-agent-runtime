@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/go-openapi/jsonpointer v0.23.0
 	github.com/go-viper/mapstructure/v2 v2.5.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/invopop/jsonschema v0.13.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.1

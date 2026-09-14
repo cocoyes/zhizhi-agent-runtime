@@ -14,6 +14,10 @@
 
 Production-grade Go runtime for agents that plan, act, recover, and remain auditable.
 
+Version 1.0.7 adds a realtime duplex speech API, kept separate from ordinary
+LLM calls, plus a function-calling Doubao adapter. See
+[Doubao realtime speech](docs/doubao-realtime-speech.md).
+
 Zhizhi is a model-agnostic execution layer for real applications. It turns ordinary Go functions into validated tools, builds dependency-safe plans, handles conditional branches and bounded replanning, and makes side effects explicit.
 
 ## What You Get

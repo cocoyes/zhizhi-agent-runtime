@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.0.7 - 2026-09-14
+
+- Added a provider-neutral realtime `speech` contract, deliberately separated
+  from the bounded LLM `model.Model` interface.
+- Added a Doubao duplex realtime speech adapter with audio streaming, ASR/TTS
+  events, mute/unmute, response cancellation, context items, and graceful close.
+- Added parallel function-call execution backed by the existing typed tool
+  registry, including stable wire-name mapping and explicit side-effect safety.
+
 ## 1.0.5 - 2026-09-05
 
 - Added deterministic semantic compatibility checks for replanned capability
