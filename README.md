@@ -20,6 +20,16 @@ LLM calls, plus a function-calling Doubao adapter. See
 
 Zhizhi is a model-agnostic execution layer for real applications. It turns ordinary Go functions into validated tools, builds dependency-safe plans, handles conditional branches and bounded replanning, and makes side effects explicit.
 
+## Star History
+
+<a href="https://www.star-history.com/?repos=cocoyes%2Fzhizhi-agent-runtime&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=cocoyes/zhizhi-agent-runtime&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=cocoyes/zhizhi-agent-runtime&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=cocoyes/zhizhi-agent-runtime&type=date&legend=top-left" />
+ </picture>
+</a>
+
 ## What You Get
 
 - Typed tools with generated JSON schemas and runtime input/output validation
