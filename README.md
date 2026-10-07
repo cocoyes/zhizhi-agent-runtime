@@ -375,6 +375,7 @@ Responses expose `Evidence`, `Actions`, `Warnings`, and statistics for model cal
 | `09-config-agent` | YAML configuration | `go run ./examples/09-config-agent` |
 | `10-full-agent` | Conditions, bindings, replan, composition | `go run ./examples/10-full-agent` |
 | `11-household-workflow` | Real-model parallel steps, conditional bindings, and failure replanning | `go run ./examples/11-household-workflow` |
+| `13-parallel-search` | Opt-in keyless web research via Parallel Search MCP | `go run ./examples/13-parallel-search` |
 
 ## Development
 

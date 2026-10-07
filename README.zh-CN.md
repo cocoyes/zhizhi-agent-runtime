@@ -291,6 +291,7 @@ Agent 创建，`Required` 服务不可用时则明确失败。Provider 支持目
 | `09-config-agent` | YAML 配置 | `go run ./examples/09-config-agent` |
 | `10-full-agent` | 条件、绑定、replan 和组合 | `go run ./examples/10-full-agent` |
 | `11-household-workflow` | 真实模型驱动的并行、条件绑定与故障重规划 | `go run ./examples/11-household-workflow` |
+| `13-parallel-search` | 通过 Parallel Search MCP 进行无需密钥的可选网页研究 | `go run ./examples/13-parallel-search` |
 
 ## 开发与验证
 
