@@ -58,6 +58,9 @@ func ValidateAgainstTools(value Plan, tools []model.ToolSpec) error {
 				sourceNode, sourceOK := schemaAt(sourceSpec.OutputSchema, binding.SourcePath)
 				targetNode, targetOK := schemaAt(spec.Function.Parameters, binding.TargetPath)
 				if !sourceOK {
+					if len(sourceSpec.OutputSchema) == 0 || strings.TrimSpace(string(sourceSpec.OutputSchema)) == "null" {
+						return fmt.Errorf("plan: step %q binding source path %q is unavailable because source tool %q declares no output schema; deterministic bindings are unavailable, use a bounded agentic step when downstream input depends on its runtime observation", step.ID, binding.SourcePath, sourceSpec.Function.Name)
+					}
 					return fmt.Errorf("plan: step %q binding source path %q is absent from step %q output schema", step.ID, binding.SourcePath, binding.SourceStep)
 				}
 				if !targetOK {

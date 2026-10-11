@@ -2,6 +2,7 @@ package plan
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/cocoyes/zhizhi-agent-runtime/model"
@@ -22,6 +23,23 @@ func validationCatalog() []model.ToolSpec {
 		return "", nil
 	}, tool.WithCapabilities("target"))
 	return []model.ToolSpec{source.ModelSpec(), target.ModelSpec()}
+}
+
+func TestValidateAgainstToolsExplainsSchemaLessBindingFallback(t *testing.T) {
+	catalog := validationCatalog()
+	catalog[0].OutputSchema = nil
+	value := Plan{Steps: []Step{
+		{ID: "source", Capability: "source"},
+		{ID: "target", Capability: "target", DependsOn: []string{"source"}, Bindings: []InputBinding{{SourceStep: "source", SourcePath: "/temperature", TargetPath: "/temperature"}}},
+	}}
+	err := ValidateAgainstTools(value, catalog)
+	if err == nil {
+		t.Fatal("expected a schema-less binding to be rejected")
+	}
+	message := err.Error()
+	if !strings.Contains(message, `source tool "source" declares no output schema`) || !strings.Contains(message, "agentic step") {
+		t.Fatalf("expected actionable schema-less guidance, got: %v", err)
+	}
 }
 
 func TestValidateAgainstToolsRejectsUncoveredRequiredInput(t *testing.T) {
