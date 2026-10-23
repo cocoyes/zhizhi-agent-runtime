@@ -3,8 +3,10 @@
 package structuredoutput
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 
 	"github.com/cocoyes/zhizhi-agent-runtime/model"
 	"github.com/go-viper/mapstructure/v2"
@@ -67,11 +69,27 @@ func Decode(text string, result any) error {
 	return decodeMapStructure(text, result, false, directErr)
 }
 
-// DecodeStrict rejects unknown fields while retaining JSON repair and weak
-// scalar conversion. Use it at boundaries where accepting a wrapper as a
+// DecodeStrict repairs JSON syntax, then rejects unknown fields and scalar
+// type coercion. Use it at boundaries where accepting a wrapper as a
 // zero-value object could turn malformed output into a successful no-op.
 func DecodeStrict(text string, result any) error {
-	return decodeMapStructure(text, result, true, nil)
+	var generic any
+	if err := jsonrepair.UnmarshalJSONFromText(text, &generic); err != nil {
+		return fmt.Errorf("repair JSON: %w", err)
+	}
+	encoded, err := json.Marshal(generic)
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(result); err != nil {
+		return fmt.Errorf("decode repaired JSON: %w", err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return fmt.Errorf("multiple JSON values")
+	}
+	return nil
 }
 
 func decodeMapStructure(text string, result any, errorUnused bool, directErr error) error {

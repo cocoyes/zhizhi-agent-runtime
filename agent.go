@@ -16,6 +16,7 @@ import (
 
 	"github.com/cocoyes/zhizhi-agent-runtime/checkpoint"
 	"github.com/cocoyes/zhizhi-agent-runtime/contract"
+	"github.com/cocoyes/zhizhi-agent-runtime/internal/budget"
 	"github.com/cocoyes/zhizhi-agent-runtime/internal/runtime/exec"
 	"github.com/cocoyes/zhizhi-agent-runtime/internal/runtime/react"
 	runtimemcp "github.com/cocoyes/zhizhi-agent-runtime/mcp"
@@ -137,6 +138,7 @@ type config struct {
 	mcpCapabilityProviders []*runtimemcp.CapabilityProvider
 	observer               observe.Observer
 	budget                 Budget
+	plannerRecovery        PlannerRecoveryPolicy
 	guard                  Guard
 	confirm                ConfirmFunc
 	failurePolicy          policy.Runner
@@ -246,7 +248,6 @@ func New(options ...Option) (Agent, error) {
 	if c.runIDGenerator == nil {
 		c.runIDGenerator = defaultRunID
 	}
-	c.model = middleware.WrapModel(c.model, c.modelMiddleware, c.modelStreamMiddleware)
 	registry := tool.NewRegistry(c.tools...)
 	if err := registry.Validate(); err != nil {
 		return nil, err
@@ -315,8 +316,12 @@ func (r *runtime) selectMCPTools(ctx context.Context, selector model.Model, requ
 
 func catalogFingerprint(registry *tool.Registry) string {
 	h := sha256.New()
-	for _, spec := range registry.ModelSpecs() {
-		_, _ = h.Write([]byte(spec.Function.Name + "\x00" + spec.Function.Description + "\x00" + string(spec.Function.Parameters) + "\x00" + string(spec.OutputSchema)))
+	for _, value := range registry.Tools() {
+		// Confirmation, effects, fallback policy and capabilities are part of
+		// resume authorization, alongside the invocation schemas.
+		encoded, _ := json.Marshal(value.Spec())
+		_, _ = h.Write(encoded)
+		_, _ = h.Write([]byte{0})
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
@@ -343,6 +348,7 @@ type complexResumeState struct {
 	Completed  []checkpointStepResult `json:"completed"`
 	Usage      model.Usage            `json:"usage,omitempty"`
 	ModelCalls int                    `json:"model_calls,omitempty"`
+	ToolCalls  int                    `json:"tool_calls,omitempty"`
 	Replans    int                    `json:"replans,omitempty"`
 	StartedAt  time.Time              `json:"started_at"`
 }
@@ -361,15 +367,16 @@ type checkpointStepResult struct {
 	Skipped             bool                `json:"skipped,omitempty"`
 	ConditionUnknown    bool                `json:"condition_unknown,omitempty"`
 	Input               json.RawMessage     `json:"input,omitempty"`
+	Continuation        *react.Continuation `json:"continuation,omitempty"`
 }
 
 func persistStepResults(values []exec.StepResult, pendingStep string) []checkpointStepResult {
 	out := make([]checkpointStepResult, 0, len(values))
 	for _, value := range values {
-		if value.StepID == pendingStep || value.Err != nil {
+		if (value.StepID == pendingStep || value.Err != nil) && value.Continuation == nil {
 			continue
 		}
-		out = append(out, checkpointStepResult{StepID: value.StepID, RequestedCapability: value.RequestedCapability, Capability: value.Capability, ToolID: value.ToolID, Content: value.Content, Receipt: value.Receipt, Action: value.Action, Duration: value.Duration, Attempts: value.Attempts, Fallbacks: value.Fallbacks, Skipped: value.Skipped, ConditionUnknown: value.ConditionUnknown, Input: append(json.RawMessage(nil), value.Input...)})
+		out = append(out, checkpointStepResult{StepID: value.StepID, RequestedCapability: value.RequestedCapability, Capability: value.Capability, ToolID: value.ToolID, Content: value.Content, Receipt: value.Receipt, Action: value.Action, Duration: value.Duration, Attempts: value.Attempts, Fallbacks: value.Fallbacks, Skipped: value.Skipped, ConditionUnknown: value.ConditionUnknown, Input: append(json.RawMessage(nil), value.Input...), Continuation: value.Continuation})
 	}
 	return out
 }
@@ -377,6 +384,9 @@ func persistStepResults(values []exec.StepResult, pendingStep string) []checkpoi
 func restoreStepResults(values []checkpointStepResult) map[string]exec.StepResult {
 	out := make(map[string]exec.StepResult, len(values))
 	for _, value := range values {
+		if value.Continuation != nil {
+			continue
+		}
 		out[value.StepID] = exec.StepResult{StepID: value.StepID, RequestedCapability: value.RequestedCapability, Capability: value.Capability, ToolID: value.ToolID, Content: value.Content, Receipt: value.Receipt, Action: value.Action, Duration: value.Duration, Attempts: value.Attempts, Fallbacks: value.Fallbacks, Skipped: value.Skipped, ConditionUnknown: value.ConditionUnknown, Input: append(json.RawMessage(nil), value.Input...)}
 	}
 	return out
@@ -384,6 +394,10 @@ func restoreStepResults(values []checkpointStepResult) map[string]exec.StepResul
 
 func (r *runtime) saveCheckpoint(ctx context.Context, registry *tool.Registry, runID string, state simpleResumeState, pending model.ToolCallRequest) (string, error) {
 	state.Kind = "simple"
+	if ledger := budget.FromContext(ctx); ledger != nil {
+		used := ledger.Snapshot()
+		state.ModelCalls, state.ToolCalls = used.ModelCalls, used.ToolCalls
+	}
 	id, err := checkpoint.NewID()
 	if err != nil {
 		return "", err
@@ -394,6 +408,11 @@ func (r *runtime) saveCheckpoint(ctx context.Context, registry *tool.Registry, r
 	}
 	now := time.Now().UTC()
 	value := checkpoint.Checkpoint{Version: checkpoint.CurrentVersion, ID: id, RunID: runID, Reason: checkpoint.ReasonConfirmation, CatalogFingerprint: catalogFingerprint(registry), Messages: state.Input.Messages, Evidence: state.Evidence, Actions: state.Actions, Pending: &checkpoint.PendingInvocation{CallID: pending.ID, ToolID: pending.Function.Name, Arguments: json.RawMessage(pending.Function.Arguments)}, Budget: checkpoint.BudgetUsage{ModelCalls: state.ModelCalls, ToolCalls: state.ToolCalls}, State: encoded, CreatedAt: now, UpdatedAt: now}
+	value.Deadline, _ = ctx.Deadline()
+	if ledger := budget.FromContext(ctx); ledger != nil {
+		limits := ledger.Limits()
+		value.Limits = checkpoint.BudgetLimits{MaxModelCalls: limits.ModelCalls, MaxToolCalls: limits.ToolCalls}
+	}
 	if err := r.cfg.checkpointStore.Save(ctx, value); err != nil {
 		return "", err
 	}
@@ -403,6 +422,10 @@ func (r *runtime) saveCheckpoint(ctx context.Context, registry *tool.Registry, r
 
 func (r *runtime) saveComplexCheckpoint(ctx context.Context, registry *tool.Registry, runID string, state complexResumeState, pending exec.StepResult) (string, error) {
 	state.Kind = "complex"
+	if ledger := budget.FromContext(ctx); ledger != nil {
+		used := ledger.Snapshot()
+		state.ModelCalls, state.ToolCalls = used.ModelCalls, used.ToolCalls
+	}
 	id, err := checkpoint.NewID()
 	if err != nil {
 		return "", err
@@ -414,6 +437,12 @@ func (r *runtime) saveComplexCheckpoint(ctx context.Context, registry *tool.Regi
 	now := time.Now().UTC()
 	arguments := append(json.RawMessage(nil), pending.Input...)
 	value := checkpoint.Checkpoint{Version: checkpoint.CurrentVersion, ID: id, RunID: runID, Reason: checkpoint.ReasonConfirmation, CatalogFingerprint: catalogFingerprint(registry), Actions: collectCheckpointActions(state.Completed), Pending: &checkpoint.PendingInvocation{ToolID: pending.ToolID, StepID: pending.StepID, Arguments: arguments}, State: encoded, CreatedAt: now, UpdatedAt: now}
+	value.Budget = checkpoint.BudgetUsage{ModelCalls: state.ModelCalls, ToolCalls: state.ToolCalls, Replans: state.Replans}
+	value.Deadline, _ = ctx.Deadline()
+	if ledger := budget.FromContext(ctx); ledger != nil {
+		limits := ledger.Limits()
+		value.Limits = checkpoint.BudgetLimits{MaxModelCalls: limits.ModelCalls, MaxToolCalls: limits.ToolCalls}
+	}
 	if err := r.cfg.checkpointStore.Save(ctx, value); err != nil {
 		return "", err
 	}
@@ -424,9 +453,7 @@ func (r *runtime) saveComplexCheckpoint(ctx context.Context, registry *tool.Regi
 func collectCheckpointActions(values []checkpointStepResult) []contract.ActionReceipt {
 	out := make([]contract.ActionReceipt, 0)
 	for _, value := range values {
-		if value.Action != nil {
-			out = append(out, *value.Action)
-		}
+		out = append(out, stepActions(exec.StepResult{Content: value.Content, Action: value.Action})...)
 	}
 	return out
 }
@@ -452,7 +479,7 @@ func outcomeForActions(actions []contract.ActionReceipt) contract.RunOutcome {
 	return contract.OutcomeSuccess
 }
 
-func (r *runtime) agenticExecutor(activeModel model.Model, registry *tool.Registry) exec.AgenticExecutor {
+func (r *runtime) agenticExecutor(cfg runConfig, registry *tool.Registry) exec.AgenticExecutor {
 	return func(ctx context.Context, step exec.Step, input json.RawMessage) (exec.AgenticResult, error) {
 		allowed := make([]tool.Tool, 0)
 		seen := map[string]struct{}{}
@@ -486,14 +513,17 @@ func (r *runtime) agenticExecutor(activeModel model.Model, registry *tool.Regist
 				return true, nil
 			}
 		}
-		runner := react.Runner{Model: activeModel, Registry: allowedRegistry, Budget: budget, Guard: react.Guard(func(ctx context.Context, spec tool.Spec) error {
+		runner := react.Runner{Model: cfg.model, Registry: allowedRegistry, Budget: budget, Continuation: step.Continuation, Guard: react.Guard(func(ctx context.Context, spec tool.Spec) error {
 			if r.cfg.guard == nil {
 				return nil
 			}
 			return r.cfg.guard(ctx, spec)
 		}), Confirm: confirm}
 		messages := []model.Message{{Role: model.RoleSystem, Content: "Achieve the step goal using only the allowed tools. Stop when the success criteria are satisfied."}, {Role: model.RoleUser, Content: "Goal: " + step.Goal + "\nSuccess criteria: " + step.SuccessCriteria + "\nInput: " + string(input)}}
-		result, err := runner.Run(ctx, messages)
+		if original, ok := ctx.Value(requestMessagesKey{}).([]model.Message); ok {
+			messages = append(append([]model.Message(nil), original...), messages...)
+		}
+		result, err := runner.RunInput(ctx, model.ModelInput{Messages: messages, Options: cloneMetadata(cfg.modelOptions)})
 		var action *tool.ActionReceipt
 		if len(result.Actions) > 0 {
 			copyAction := result.Actions[len(result.Actions)-1]
@@ -501,7 +531,7 @@ func (r *runtime) agenticExecutor(activeModel model.Model, registry *tool.Regist
 			action = &copyAction
 		}
 		content := map[string]any{"text": result.Text, "evidence": result.Evidence, "actions": result.Actions}
-		return exec.AgenticResult{Content: content, Action: action, ToolCalls: result.ToolCalls, ModelCalls: result.ModelCalls, PromptTokens: result.Usage.PromptTokens, CompletionTokens: result.Usage.CompletionTokens, TotalTokens: result.Usage.TotalTokens, PendingArguments: result.PendingArguments}, err
+		return exec.AgenticResult{Content: content, Action: action, ToolCalls: result.ToolCalls, ModelCalls: result.ModelCalls, PromptTokens: result.Usage.PromptTokens, CompletionTokens: result.Usage.CompletionTokens, TotalTokens: result.Usage.TotalTokens, PendingArguments: result.PendingArguments, Continuation: result.Continuation}, err
 	}
 }
 
@@ -534,6 +564,28 @@ func (r *runtime) Resume(ctx context.Context, req ResumeRequest, options ...RunO
 	value, err := r.cfg.checkpointStore.Load(ctx, req.Checkpoint)
 	if err != nil {
 		return nil, err
+	}
+	if err := value.Validate(); err != nil {
+		return nil, err
+	}
+	if !value.Deadline.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, value.Deadline)
+		defer cancel()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	runCfg.ledger = budget.New(stricterLimit(r.cfg.budget.MaxModelCalls, value.Limits.MaxModelCalls), stricterLimit(r.cfg.budget.MaxToolCalls, value.Limits.MaxToolCalls))
+	ctx = budget.WithLedger(ctx, runCfg.ledger)
+	if err := runCfg.ledger.Restore(budget.Usage{ModelCalls: value.Budget.ModelCalls, ToolCalls: value.Budget.ToolCalls}); err != nil {
+		return nil, err
+	}
+	runCfg.counter.calls = value.Budget.ModelCalls
+	r.observeBudget(ctx, value.RunID)
+	if runCfg.observer != nil {
+		r.runObservers.Store(value.RunID, runCfg.observer)
+		defer r.runObservers.Delete(value.RunID)
 	}
 	if req.RunID != "" && req.RunID != value.RunID {
 		return nil, errors.New("resume: run id does not match checkpoint")
@@ -570,20 +622,30 @@ func (r *runtime) Resume(ctx context.Context, req ResumeRequest, options ...RunO
 		if err := json.Unmarshal(value.State, &state); err != nil {
 			return nil, fmt.Errorf("resume: decode complex state: %w", err)
 		}
-		response, resumeErr := r.resumeComplex(ctx, value, state, registry, runCfg)
-		if resumeErr == nil {
-			_ = r.cfg.checkpointStore.Delete(ctx, value.ID)
+		state.ModelCalls, state.ToolCalls = value.Budget.ModelCalls, value.Budget.ToolCalls
+		runCfg.counter.usage = state.Usage
+		ctx = context.WithValue(ctx, requestMessagesKey{}, r.requestMessages(state.Request))
+		// Consume authorization before any dispatch so a failed continuation cannot
+		// replay a write using the same checkpoint.
+		if err := r.cfg.checkpointStore.Delete(ctx, value.ID); err != nil {
+			return nil, err
 		}
+		response, resumeErr := r.resumeComplex(ctx, value, state, registry, runCfg)
 		return response, resumeErr
 	}
 	var state simpleResumeState
 	if err := json.Unmarshal(value.State, &state); err != nil {
 		return nil, fmt.Errorf("resume: decode state: %w", err)
 	}
-	response, err = r.resumeSimple(ctx, value.RunID, state, registry, runCfg.model)
-	if err == nil {
-		_ = r.cfg.checkpointStore.Delete(ctx, value.ID)
+	if value.Pending == nil || len(state.Remaining) == 0 || state.Remaining[0].Function.Name != value.Pending.ToolID || !sameJSON([]byte(state.Remaining[0].Function.Arguments), value.Pending.Arguments) {
+		return nil, errors.New("resume: pending invocation does not match approval")
 	}
+	state.ModelCalls, state.ToolCalls = value.Budget.ModelCalls, value.Budget.ToolCalls
+	runCfg.counter.usage = state.Usage
+	if err := r.cfg.checkpointStore.Delete(ctx, value.ID); err != nil {
+		return nil, err
+	}
+	response, err = r.resumeSimple(ctx, value.RunID, state, registry, runCfg.model)
 	return response, err
 }
 
@@ -598,9 +660,6 @@ func (r *runtime) resumeSimple(ctx context.Context, runID string, state simpleRe
 	remaining := state.Remaining
 	for iteration := 0; iteration < 8; iteration++ {
 		for index, call := range remaining {
-			if r.cfg.budget.MaxToolCalls > 0 && toolCalls >= r.cfg.budget.MaxToolCalls {
-				return nil, errors.New("budget: max tool calls exceeded")
-			}
 			value, found := registry.Get(call.Function.Name)
 			if !found {
 				return nil, fmt.Errorf("tool not found: %s", call.Function.Name)
@@ -646,9 +705,6 @@ func (r *runtime) resumeSimple(ctx context.Context, runID string, state simpleRe
 			input.Messages = append(input.Messages, model.Message{Role: model.RoleTool, ToolCallID: call.ID, Content: string(encoded)})
 		}
 		remaining = nil
-		if r.cfg.budget.MaxModelCalls > 0 && modelCalls >= r.cfg.budget.MaxModelCalls {
-			return nil, errors.New("budget: max model calls exceeded")
-		}
 		out, err := runModel.Generate(ctx, input)
 		if err != nil {
 			return nil, err
@@ -684,13 +740,33 @@ func (r *runtime) resumeSimple(ctx context.Context, runID string, state simpleRe
 }
 
 func (r *runtime) resumeComplex(ctx context.Context, checkpointValue *checkpoint.Checkpoint, state complexResumeState, registry *tool.Registry, runCfg runConfig) (*Response, error) {
-	counter := &modelCounter{base: runCfg.model, calls: state.ModelCalls, usage: state.Usage}
+	counter := runCfg.counter
 	if err := plan.ValidateAgainstTools(state.Plan, registry.ModelSpecs()); err != nil {
 		return nil, err
 	}
 	execution, err := exec.Compile(state.Plan)
 	if err != nil {
 		return nil, err
+	}
+	if r.cfg.budget.MaxBatches > 0 && len(execution.Batches) > r.cfg.budget.MaxBatches {
+		return nil, errors.New("budget: max batches exceeded")
+	}
+	for _, saved := range state.Completed {
+		if saved.Continuation == nil {
+			continue
+		}
+		for i := range execution.Steps {
+			if execution.Steps[i].ID == saved.StepID {
+				execution.Steps[i].Continuation = saved.Continuation
+			}
+		}
+		for i := range execution.Batches {
+			for j := range execution.Batches[i].Steps {
+				if execution.Batches[i].Steps[j].ID == saved.StepID {
+					execution.Batches[i].Steps[j].Continuation = saved.Continuation
+				}
+			}
+		}
 	}
 	if r.cfg.budget.MaxSteps > 0 && len(state.Plan.Steps) > r.cfg.budget.MaxSteps {
 		return nil, errors.New("budget: max steps exceeded")
@@ -709,15 +785,13 @@ func (r *runtime) resumeComplex(ctx context.Context, checkpointValue *checkpoint
 			return nil
 		}
 		return r.cfg.guard(ctx, value.Spec())
-	}, Confirm: r.cfg.confirm, Agentic: r.agenticExecutor(counter, registry), Observe: func(event policy.Event) {
+	}, Confirm: r.cfg.confirm, Agentic: r.agenticExecutor(runCfg, registry), Observe: func(event policy.Event) {
 		r.emit(observe.Event{Type: event.Type, RunID: checkpointValue.RunID, PlanVersion: state.Plan.Version, ToolID: event.ToolID, Attempt: event.Attempt, Data: map[string]any{"fallback": event.Fallback, "error_kind": event.ErrorKind, "error": errString(event.Err)}})
 	}}
 	results, err := scheduler.Run(ctx, execution, nil)
 	r.emitStepResults(checkpointValue.RunID, state.Plan.Version, results)
-	if err != nil {
-		return nil, err
-	}
-	if pending, ok := confirmationPending(results); ok {
+	unsafeReplay := hasAmbiguousAction(results) || failedAfterWrite(results)
+	if pending, ok := confirmationPending(results); ok && !unsafeReplay {
 		modelCalls, usage := counter.snapshot()
 		next := complexResumeState{Kind: "complex", Request: state.Request, Plan: state.Plan, Completed: persistStepResults(results, pending.StepID), Usage: usage, ModelCalls: modelCalls, Replans: state.Replans, StartedAt: state.StartedAt}
 		id, saveErr := r.saveComplexCheckpoint(ctx, registry, checkpointValue.RunID, next, pending)
@@ -725,6 +799,9 @@ func (r *runtime) resumeComplex(ctx context.Context, checkpointValue *checkpoint
 			return nil, saveErr
 		}
 		return &Response{RunID: checkpointValue.RunID, Checkpoint: id, Suspended: true, Outcome: contract.OutcomeSuspended, Actions: []contract.ActionReceipt{*pending.Action}, Warnings: []contract.Warning{{Code: "CONFIRMATION_REQUIRED", Message: pending.Action.Message, StepID: pending.StepID}}}, nil
+	}
+	if err != nil && !unsafeReplay {
+		return nil, err
 	}
 	started := state.StartedAt
 	if started.IsZero() {
@@ -743,9 +820,9 @@ func (r *runtime) resumeComplex(ctx context.Context, checkpointValue *checkpoint
 			warnings = append(warnings, contract.Warning{Code: code, Message: message, StepID: result.StepID})
 			continue
 		}
-		if result.Action != nil {
-			actions = append(actions, *result.Action)
-			if result.Action.Status != contract.ActionSuccess {
+		for _, action := range stepActions(result) {
+			actions = append(actions, action)
+			if action.Status != contract.ActionSuccess {
 				outcome = contract.OutcomeDegraded
 			}
 		}
@@ -768,10 +845,11 @@ func (r *runtime) resumeComplex(ctx context.Context, checkpointValue *checkpoint
 		return nil, fmt.Errorf("resume: encode final evidence: %w", marshalErr)
 	}
 	input := model.ModelInput{Messages: []model.Message{{Role: model.RoleSystem, Content: "Answer using only the structured execution facts. step_id is only a plan node name and must never be described as a tool. tool_id is the only executed tool identity. A write action is complete only when status is success and it has a successful receipt. Never infer a missing or unknown value as false."}, {Role: model.RoleUser, Content: string(evidenceJSON)}}, ResponseFormat: runCfg.responseFormat, Options: cloneMetadata(runCfg.modelOptions)}
+	input.Messages = append(r.requestMessages(state.Request), input.Messages...)
 	if err := model.ValidateCapabilities(counter.Capabilities(), input, false); err != nil {
 		return nil, err
 	}
-	final, err := counter.Generate(ctx, input)
+	final, err := runCfg.model.Generate(ctx, input)
 	if err != nil {
 		return nil, fmt.Errorf("final composer: %w", err)
 	}
@@ -783,6 +861,7 @@ func (r *runtime) resumeComplex(ctx context.Context, checkpointValue *checkpoint
 	}
 	modelCalls, totalUsage := counter.snapshot()
 	toolCalls, successful, failed, retries, fallbacks := stepStats(results)
+	toolCalls = runCfg.ledger.Snapshot().ToolCalls
 	stats := contract.RunStats{ModelCalls: modelCalls, ToolCalls: toolCalls, SuccessfulTools: successful, FailedTools: failed, Retries: retries, Fallbacks: fallbacks, PlanSteps: len(state.Plan.Steps), Batches: len(execution.Batches), Replans: state.Replans, PromptTokens: totalUsage.PromptTokens, CompletionTokens: totalUsage.CompletionTokens, TotalTokens: totalUsage.TotalTokens, Duration: time.Since(started)}
 	return &Response{RunID: checkpointValue.RunID, Text: final.Text, FinishReason: final.FinishReason, Usage: totalUsage, Outcome: outcome, Stats: stats, Warnings: warnings, ToolCalls: toolCalls, Evidence: evidence, PlanSteps: len(state.Plan.Steps), Batches: len(execution.Batches), Replans: state.Replans, Actions: actions}, nil
 }
@@ -849,31 +928,46 @@ func (r *runtime) Run(ctx context.Context, req Request, options ...RunOption) (*
 	return response, standardizeError("agent.run", err)
 }
 
-func (r *runtime) run(ctx context.Context, req Request, options ...RunOption) (*Response, error) {
-	if err := r.prepare(ctx); err != nil {
-		return nil, err
-	}
-	selected, err := r.selectMCPTools(ctx, r.cfg.model, req.Input)
-	if err != nil {
-		return nil, err
-	}
-	effectiveOptions := append(append([]RunOption(nil), options...), WithRunTools(selected...))
-	runCfg, registry, err := r.newRunConfig(effectiveOptions)
-	if err != nil {
-		return nil, err
-	}
+func (r *runtime) run(ctx context.Context, req Request, options ...RunOption) (response *Response, returnErr error) {
 	if r.cfg.budget.HardTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, r.cfg.budget.HardTimeout)
 		defer cancel()
 	}
+	if err := r.prepare(ctx); err != nil {
+		return nil, err
+	}
+	runCfg, registry, err := r.newRunConfig(options)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if response != nil {
+			calls, usage := runCfg.counter.snapshot()
+			response.Stats.ModelCalls = calls
+			response.Usage = usage
+			response.Stats.PromptTokens, response.Stats.CompletionTokens, response.Stats.TotalTokens = usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens
+			response.Stats.ToolCalls = runCfg.ledger.Snapshot().ToolCalls
+			response.ToolCalls = response.Stats.ToolCalls
+		}
+	}()
+	ctx = budget.WithLedger(ctx, runCfg.ledger)
 	runID, err := r.nextRunID()
 	if err != nil {
 		return nil, err
 	}
+	r.observeBudget(ctx, runID)
 	if runCfg.observer != nil {
 		r.runObservers.Store(runID, runCfg.observer)
 		defer r.runObservers.Delete(runID)
+	}
+	selected, err := r.selectMCPTools(ctx, runCfg.model, req.Input)
+	if err != nil {
+		return nil, err
+	}
+	registry, err = r.addSelectedTools(runCfg, registry, selected)
+	if err != nil {
+		return nil, err
 	}
 	if len(runCfg.metadata) > 0 {
 		if req.Metadata == nil {
@@ -926,15 +1020,12 @@ func (r *runtime) run(ctx context.Context, req Request, options ...RunOption) (*
 	var evidence []Evidence
 	var actions []contract.ActionReceipt
 	var usage model.Usage
-	modelCalls, toolCalls := 0, 0
+	modelCalls, _ := runCfg.counter.snapshot()
+	toolCalls := 0
 	successfulTools, failedTools := 0, 0
 	started := time.Now()
 	for i := 0; i < 8; i++ {
 		modelCalls++
-		if r.cfg.budget.MaxModelCalls > 0 && modelCalls > r.cfg.budget.MaxModelCalls {
-			r.emit(observe.Event{Type: "run.failed", RunID: runID, Data: map[string]any{"error": "max model calls exceeded"}})
-			return nil, fmt.Errorf("budget: max model calls exceeded")
-		}
 		r.emit(observe.Event{Type: "model.request", RunID: runID, Data: map[string]any{"call": modelCalls}, Details: map[string]any{"messages": input.Messages, "tools": input.Tools}})
 		out, err := runCfg.model.Generate(ctx, input)
 		if err != nil {
@@ -958,11 +1049,6 @@ func (r *runtime) run(ctx context.Context, req Request, options ...RunOption) (*
 		}
 		input.Messages = append(input.Messages, model.Message{Role: model.RoleAssistant, Content: out.Text, ReasoningContent: out.ReasoningContent, ToolCalls: out.ToolCalls})
 		for callIndex, call := range out.ToolCalls {
-			toolCalls++
-			if r.cfg.budget.MaxToolCalls > 0 && toolCalls > r.cfg.budget.MaxToolCalls {
-				r.emit(observe.Event{Type: "run.failed", RunID: runID, Data: map[string]any{"error": "max tool calls exceeded"}})
-				return nil, fmt.Errorf("budget: max tool calls exceeded")
-			}
 			t, ok := registry.Get(call.Function.Name)
 			if !ok {
 				r.emit(observe.Event{Type: "run.failed", RunID: runID, Data: map[string]any{"error": "tool not found", "tool_id": call.Function.Name}})
@@ -989,7 +1075,7 @@ func (r *runtime) run(ctx context.Context, req Request, options ...RunOption) (*
 					responseActions := append(append([]contract.ActionReceipt(nil), actions...), receipt)
 					resp := &Response{RunID: runID, Outcome: contract.OutcomeSuspended, Suspended: true, Warnings: []contract.Warning{{Code: "CONFIRMATION_REQUIRED", Message: receipt.Message, StepID: spec.ID}}, Actions: responseActions, Stats: contract.RunStats{ModelCalls: modelCalls, ToolCalls: toolCalls, Duration: time.Since(started)}}
 					if r.cfg.checkpointStore != nil {
-						state := simpleResumeState{Kind: "simple", Request: req, Input: input, Remaining: append([]model.ToolCallRequest(nil), out.ToolCalls[callIndex:]...), Usage: usage, Evidence: evidence, Actions: actions, ModelCalls: modelCalls, ToolCalls: toolCalls - 1, SuccessfulTools: successfulTools, FailedTools: failedTools, StartedAt: started}
+						state := simpleResumeState{Kind: "simple", Request: req, Input: input, Remaining: append([]model.ToolCallRequest(nil), out.ToolCalls[callIndex:]...), Usage: usage, Evidence: evidence, Actions: actions, ModelCalls: modelCalls, ToolCalls: toolCalls, SuccessfulTools: successfulTools, FailedTools: failedTools, StartedAt: started}
 						id, saveErr := r.saveCheckpoint(ctx, registry, runID, state, call)
 						if saveErr != nil {
 							return nil, saveErr
@@ -1000,6 +1086,7 @@ func (r *runtime) run(ctx context.Context, req Request, options ...RunOption) (*
 				}
 			}
 			result, err := tool.CallAndCollect(ctx, t, json.RawMessage(call.Function.Arguments), nil)
+			toolCalls = runCfg.ledger.Snapshot().ToolCalls
 			if err != nil {
 				failedTools++
 				r.emit(observe.Event{Type: "run.failed", RunID: runID, Data: map[string]any{"error": err.Error(), "tool_id": call.Function.Name}})
@@ -1024,13 +1111,14 @@ func (r *runtime) run(ctx context.Context, req Request, options ...RunOption) (*
 	return nil, errors.New("agent: tool call limit exceeded")
 }
 
-func (r *runtime) runComplex(ctx context.Context, req Request, runID string, registry *tool.Registry, runCfg runConfig) (*Response, error) {
+func (r *runtime) runComplex(ctx context.Context, req Request, runID string, registry *tool.Registry, runCfg runConfig) (response *Response, returnErr error) {
+	ctx = context.WithValue(ctx, requestMessagesKey{}, r.requestMessages(req))
 	p := r.cfg.planner
 	if p == nil {
 		modelPlanner := plan.NewModelPlanner(runCfg.model)
-		modelPlanner.Trace = func(event string, details map[string]any) {
-			r.emit(observe.Event{Type: "planner." + event, RunID: runID, Details: details})
-		}
+		modelPlanner.MaxRepairAttempts = r.cfg.plannerRecovery.MaxRepairAttempts
+		modelPlanner.DisableOutputTool = r.cfg.plannerRecovery.DisableOutputTool
+		modelPlanner.Trace = r.plannerTrace("planner", runID, 0)
 		p = modelPlanner
 	}
 	r.emit(observe.Event{Type: "planner.started", RunID: runID, Details: map[string]any{"request": req.Input, "tools": model.PlanningToolCatalog(registry.ModelSpecs())}})
@@ -1042,9 +1130,24 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 		planHandler = plannerMiddleware[i](planHandler)
 	}
 	semantic, err := planHandler(ctx, middleware.PlannerInput{Request: req.Input, Tools: registry.ModelSpecs()})
+	recovered := false
 	if err != nil {
-		r.emit(observe.Event{Type: "planner.failed", RunID: runID, Data: map[string]any{"error": err.Error()}})
-		return nil, err
+		r.emit(observe.Event{Type: "planner.failed", RunID: runID, Data: map[string]any{"error": "initial_plan_failed"}, Details: map[string]any{"error": err.Error()}})
+		var response *Response
+		semantic, response, err = r.initialRecovery(ctx, req, runID, registry, runCfg, err)
+		if err != nil || response != nil {
+			return response, err
+		}
+		recovered = true
+	}
+	if recovered {
+		defer func() {
+			outcome := "failed"
+			if returnErr == nil && response != nil {
+				outcome = string(response.Outcome)
+			}
+			r.emit(observe.Event{Type: "planner.recovery.completed", RunID: runID, Data: map[string]any{"strategy": "bounded_agentic", "reason_code": "invalid_initial_plan", "allowed_tool_count": len(registry.Tools()), "remaining_model_calls": runCfg.ledger.Remaining().ModelCalls, "remaining_tool_calls": runCfg.ledger.Remaining().ToolCalls, "outcome": outcome}})
+		}()
 	}
 	r.emit(observe.Event{Type: "planner.completed", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"steps": len(semantic.Steps)}, Details: map[string]any{"plan": semantic}})
 	semantic, err = plan.Optimize(semantic)
@@ -1078,6 +1181,9 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 	actions := make([]tool.ActionReceipt, 0)
 	started := time.Now()
 	for {
+		if r.cfg.budget.MaxSteps > 0 && len(semantic.Steps) > r.cfg.budget.MaxSteps {
+			return nil, errors.New("budget: max steps exceeded")
+		}
 		execution, err = exec.Compile(semantic)
 		if err != nil {
 			r.emit(observe.Event{Type: "plan.compile_failed", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"error": err.Error()}})
@@ -1110,7 +1216,7 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 				return nil
 			}
 			return r.cfg.guard(ctx, value.Spec())
-		}, Confirm: r.cfg.confirm, Agentic: r.agenticExecutor(runCfg.model, registry)}
+		}, Confirm: r.cfg.confirm, Agentic: r.agenticExecutor(runCfg, registry)}
 		// Let the scheduler resolve inputs so bindings can use evidence from
 		// completed dependency steps.
 		results, err = scheduler.Run(ctx, execution, nil)
@@ -1125,13 +1231,17 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 				completed[result.StepID] = completedStep{Result: result, Fingerprint: fingerprints[result.StepID]}
 			}
 		}
-		if used, _, _, _, _ := stepStats(executionHistory); r.cfg.budget.MaxToolCalls > 0 && used > r.cfg.budget.MaxToolCalls {
-			return nil, fmt.Errorf("budget: max tool calls exceeded")
-		}
 		r.emitStepResults(runID, semantic.Version, results)
+		if hasAmbiguousAction(results) || failedAfterWrite(results) {
+			// Retain write facts and stop the graph before any confirmation or
+			// replan can turn a partly executed step into a fresh invocation.
+			err = nil
+			break
+		}
 		if pending, ok := confirmationPending(results); ok {
 			modelCalls, totalUsage := runCfg.counter.snapshot()
 			toolCalls, successful, failed, retries, fallbacks := stepStats(results)
+			toolCalls = runCfg.ledger.Snapshot().ToolCalls
 			resp := &Response{RunID: runID, Suspended: true, Outcome: contract.OutcomeSuspended, Actions: []contract.ActionReceipt{*pending.Action}, Warnings: []contract.Warning{{Code: "CONFIRMATION_REQUIRED", Message: pending.Action.Message, StepID: pending.StepID}}, Usage: totalUsage, Stats: contract.RunStats{ModelCalls: modelCalls, ToolCalls: toolCalls, SuccessfulTools: successful, FailedTools: failed, Retries: retries, Fallbacks: fallbacks, PlanSteps: len(semantic.Steps), Batches: len(execution.Batches), Replans: replans, PromptTokens: totalUsage.PromptTokens, CompletionTokens: totalUsage.CompletionTokens, TotalTokens: totalUsage.TotalTokens, Duration: time.Since(started)}}
 			if r.cfg.checkpointStore != nil {
 				state := complexResumeState{Kind: "complex", Request: req, Plan: semantic, Completed: persistStepResults(results, pending.StepID), Usage: totalUsage, ModelCalls: modelCalls, Replans: replans, StartedAt: started}
@@ -1143,11 +1253,8 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 			}
 			return resp, nil
 		}
-		if hasAmbiguousAction(results) {
-			// A write may already have happened. Never replan into another write or
-			// retry it automatically; compose a degraded response from the facts.
-			err = nil
-			break
+		if errors.Is(err, budget.Exceeded) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
 		}
 		if err == nil {
 			r.emit(observe.Event{Type: "plan.compiled", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"steps": len(semantic.Steps), "batches": len(execution.Batches)}})
@@ -1156,15 +1263,18 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 			}
 			break
 		}
+		if recovered {
+			return nil, err
+		}
 		if replans >= maxReplans {
 			return nil, fmt.Errorf("budget: max replans exceeded after execution failure: %w", err)
 		}
 		rp := r.cfg.replanner
 		if rp == nil {
 			modelReplanner := plan.NewModelReplanner(runCfg.model)
-			modelReplanner.Trace = func(event string, details map[string]any) {
-				r.emit(observe.Event{Type: "replan." + event, RunID: runID, PlanVersion: semantic.Version, Details: details})
-			}
+			modelReplanner.MaxRepairAttempts = r.cfg.plannerRecovery.MaxRepairAttempts
+			modelReplanner.DisableOutputTool = r.cfg.plannerRecovery.DisableOutputTool
+			modelReplanner.Trace = r.plannerTrace("replan", runID, semantic.Version)
 			rp = modelReplanner
 		}
 		replanInput := plan.Input{Original: semantic, Failure: err.Error(), Tools: registry.ModelSpecs()}
@@ -1176,15 +1286,20 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 		}
 		patch, patchErr := replanHandler(ctx, replanInput)
 		if patchErr != nil {
-			return nil, fmt.Errorf("replan: execution failed: %v; replanner failed: %w", err, patchErr)
+			return nil, &safeOperationError{message: "replan: execution and replanning failed", cause: errors.Join(err, patchErr)}
 		}
 		if compatibilityErr := plan.ValidatePatchCompatibility(semantic, patch, registry.ModelSpecs()); compatibilityErr != nil {
 			return nil, compatibilityErr
 		}
-		semantic, err = patch.Apply(semantic)
+		patched, applyErr := patch.Apply(semantic)
+		err = applyErr
 		if err != nil {
 			return nil, err
 		}
+		if err := protectCompletedWrites(semantic, patched, completed, registry); err != nil {
+			return nil, err
+		}
+		semantic = patched
 		if err := plan.ValidateAgainstTools(semantic, registry.ModelSpecs()); err != nil {
 			return nil, fmt.Errorf("replan: invalid patched plan: %w", err)
 		}
@@ -1194,6 +1309,10 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 	evidence := make([]Evidence, 0, len(results))
 	warnings := make([]contract.Warning, 0)
 	outcome := contract.OutcomeSuccess
+	if recovered {
+		outcome = contract.OutcomeDegraded
+		warnings = append(warnings, contract.Warning{Code: "INITIAL_PLAN_RECOVERED", Message: "The initial plan was invalid; the response reflects bounded recovery facts and may require clarification."})
+	}
 	currentSuccess := make(map[string]bool, len(results))
 	for _, result := range results {
 		currentSuccess[result.StepID] = result.Err == nil && !result.Skipped
@@ -1213,15 +1332,15 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 			warnings = append(warnings, contract.Warning{Code: code, Message: message, StepID: result.StepID})
 			continue
 		}
-		if result.Action != nil {
-			actions = append(actions, *result.Action)
-			if result.Action.Status != contract.ActionSuccess {
+		for _, action := range stepActions(result) {
+			actions = append(actions, action)
+			if action.Status != contract.ActionSuccess {
 				outcome = contract.OutcomeDegraded
 				code := "ACTION_NOT_COMPLETED"
-				if result.Action.Status == contract.ActionUnknown {
+				if action.Status == contract.ActionUnknown {
 					code = "AMBIGUOUS_SIDE_EFFECT"
 				}
-				warnings = append(warnings, contract.Warning{Code: code, Message: result.Action.Message, StepID: result.StepID})
+				warnings = append(warnings, contract.Warning{Code: code, Message: action.Message, StepID: result.StepID})
 			}
 		}
 		if result.Err != nil {
@@ -1243,6 +1362,7 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 		return nil, fmt.Errorf("final composer evidence: %w", marshalErr)
 	}
 	finalInput := model.ModelInput{Messages: []model.Message{{Role: model.RoleSystem, Content: "Answer using only the structured execution facts. step_id is only a plan node name and must never be described as a tool. tool_id is the only executed tool identity. A write action is complete only when status is success and it has a successful receipt. Never infer a missing or unknown value as false."}, {Role: model.RoleUser, Content: string(evidenceJSON)}}, ResponseFormat: runCfg.responseFormat, Options: cloneMetadata(runCfg.modelOptions)}
+	finalInput.Messages = append(r.requestMessages(req), finalInput.Messages...)
 	r.emit(observe.Event{Type: "final_composer.started", RunID: runID, Details: map[string]any{"messages": finalInput.Messages}})
 	final, err := runCfg.model.Generate(ctx, finalInput)
 	if err != nil {
@@ -1257,6 +1377,7 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 	r.emit(observe.Event{Type: "final_composer.completed", RunID: runID, Data: map[string]any{"total_tokens": final.Usage.TotalTokens}, Details: map[string]any{"content": final.Text}})
 	modelCalls, totalUsage := runCfg.counter.snapshot()
 	toolCalls, successful, failed, retries, fallbacks := stepStats(executionHistory)
+	toolCalls = runCfg.ledger.Snapshot().ToolCalls
 	stats := contract.RunStats{ModelCalls: modelCalls, ToolCalls: toolCalls, SuccessfulTools: successful, FailedTools: failed, Retries: retries, Fallbacks: fallbacks, PlanSteps: len(semantic.Steps), Batches: len(execution.Batches), Replans: replans, Duration: time.Since(started), TotalTokens: totalUsage.TotalTokens, PromptTokens: totalUsage.PromptTokens, CompletionTokens: totalUsage.CompletionTokens}
 	return &Response{RunID: runID, Text: final.Text, FinishReason: final.FinishReason, Usage: totalUsage, Outcome: outcome, Stats: stats, Warnings: warnings, ToolCalls: toolCalls, Evidence: evidence, PlanSteps: len(semantic.Steps), Batches: len(execution.Batches), Replans: replans, Actions: actions}, nil
 }
@@ -1299,11 +1420,47 @@ func reusableSteps(execution exec.ExecutionPlan, fingerprints map[string]string,
 
 func hasAmbiguousAction(results []exec.StepResult) bool {
 	for _, result := range results {
-		if result.Action != nil && result.Action.Status == contract.ActionUnknown {
-			return true
+		for _, action := range stepActions(result) {
+			if action.Status == contract.ActionUnknown {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+func failedAfterWrite(results []exec.StepResult) bool {
+	for _, result := range results {
+		if result.Err == nil {
+			continue
+		}
+		// A confirmation continuation persists the earlier writes explicitly.
+		if result.Continuation != nil && result.Action != nil && result.Action.Status == contract.ActionConfirmationRequired {
+			continue
+		}
+		for _, action := range stepActions(result) {
+			if action.Status == contract.ActionSuccess {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func stepActions(result exec.StepResult) []contract.ActionReceipt {
+	if content, ok := result.Content.(map[string]any); ok {
+		if raw, ok := content["actions"]; ok {
+			encoded, _ := json.Marshal(raw)
+			var actions []contract.ActionReceipt
+			if json.Unmarshal(encoded, &actions) == nil && len(actions) > 0 {
+				return actions
+			}
+		}
+	}
+	if result.Action != nil {
+		return []contract.ActionReceipt{*result.Action}
+	}
+	return nil
 }
 
 func executionFacts(results []exec.StepResult) []map[string]any {
@@ -1414,6 +1571,18 @@ func (r *runtime) emitStepResults(runID string, planVersion int, results []exec.
 }
 
 func (r *runtime) emit(event observe.Event) {
+	if event.Data != nil {
+		if raw, ok := event.Data["error"].(string); ok && raw != "" {
+			data := cloneMetadata(event.Data)
+			details := cloneMetadata(event.Details)
+			if details == nil {
+				details = map[string]any{}
+			}
+			details["error"] = raw
+			data["error"] = "operation_failed"
+			event.Data, event.Details = data, details
+		}
+	}
 	if event.Time.IsZero() {
 		event.Time = time.Now().UTC()
 	}
@@ -1475,17 +1644,22 @@ func (r *runtime) Stream(ctx context.Context, req Request, options ...RunOption)
 	} else {
 		runCtx, cancel = context.WithCancel(ctx)
 	}
-	if err := r.prepare(ctx); err != nil {
+	if err := r.prepare(runCtx); err != nil {
 		cancel()
 		return nil, err
 	}
-	selected, err := r.selectMCPTools(runCtx, r.cfg.model, req.Input)
+	runCfg, registry, err := r.newRunConfig(options)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	effectiveOptions := append(append([]RunOption(nil), options...), WithRunTools(selected...))
-	runCfg, registry, err := r.newRunConfig(effectiveOptions)
+	runCtx = budget.WithLedger(runCtx, runCfg.ledger)
+	selected, err := r.selectMCPTools(runCtx, runCfg.model, req.Input)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	registry, err = r.addSelectedTools(runCfg, registry, selected)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -1520,9 +1694,8 @@ func (r *runtime) Stream(ctx context.Context, req Request, options ...RunOption)
 		}
 	}
 	if mode != nil && *mode == RunModeAgentComplex {
-		cancel()
 		owned = false
-		return newAsyncRunStream(ctx, r, req, options, runCfg.observer, r.done), nil
+		return newAsyncRunStream(runCtx, r, req, runCfg, registry, func() { cancel(); r.done() }), nil
 	}
 	msgs := append([]model.Message{}, req.Messages...)
 	if r.cfg.systemPrompt != "" {
@@ -1552,6 +1725,7 @@ func (r *runtime) Stream(ctx context.Context, req Request, options ...RunOption)
 	if runCfg.observer != nil {
 		r.runObservers.Store(runID, runCfg.observer)
 	}
+	r.observeBudget(runCtx, runID)
 	onDone := func() { r.runObservers.Delete(runID); r.done() }
 	owned = false
 	return &eventStream{stream: s, runtime: r, model: runCfg.model, registry: registry, input: streamInput, calls: make(map[int]model.ToolCallRequest), runID: runID, request: req, modelCalls: 1, started: time.Now(), pending: []Event{{Type: EventRunStarted, RunID: runID}, {Type: EventModelStarted, RunID: runID}}, ctx: runCtx, cancel: cancel, onDone: onDone}, nil
@@ -1588,6 +1762,17 @@ type eventStream struct {
 }
 
 func (s *eventStream) deliver(event Event) (Event, error) {
+	if event.Response != nil {
+		if ledger := budget.FromContext(s.ctx); ledger != nil {
+			used := ledger.Snapshot()
+			event.Response.ToolCalls = used.ToolCalls
+			event.Response.Stats.ToolCalls, event.Response.Stats.ModelCalls = used.ToolCalls, used.ModelCalls
+		}
+	}
+	if raw, ok := event.Data["error"].(string); ok && raw != "" {
+		event.Data = cloneMetadata(event.Data)
+		event.Data["error"] = "operation_failed"
+	}
 	data := event.Data
 	if data == nil {
 		data = map[string]any{}
@@ -1701,9 +1886,6 @@ func (s *eventStream) finishToolCalls(ctx context.Context) (Event, error) {
 	}
 	s.input.Messages = append(s.input.Messages, model.Message{Role: model.RoleAssistant, Content: s.assistantText, ReasoningContent: s.reasoningContent, ToolCalls: ordered})
 	for callIndex, call := range ordered {
-		if s.runtime.cfg.budget.MaxToolCalls > 0 && s.toolCalls >= s.runtime.cfg.budget.MaxToolCalls {
-			return Event{}, errors.New("budget: max tool calls exceeded")
-		}
 		t, ok := s.registry.Get(call.Function.Name)
 		if !ok {
 			return Event{}, fmt.Errorf("tool not found: %s", call.Function.Name)
@@ -1767,9 +1949,6 @@ func (s *eventStream) finishToolCalls(ctx context.Context) (Event, error) {
 		s.pending = append(s.pending, Event{Type: EventToolCompleted, RunID: s.runID, ToolID: call.Function.Name})
 	}
 	_ = s.stream.Close()
-	if s.runtime.cfg.budget.MaxModelCalls > 0 && s.modelCalls >= s.runtime.cfg.budget.MaxModelCalls {
-		return Event{}, errors.New("budget: max model calls exceeded")
-	}
 	next, err := s.model.Stream(s.ctx, s.input)
 	if err != nil {
 		return Event{}, err

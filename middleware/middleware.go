@@ -75,10 +75,13 @@ type wrappedTool struct {
 	streams []ToolStreamMiddleware
 }
 
-func (w *wrappedTool) Spec() tool.Spec           { return w.base.Spec() }
-func (w *wrappedTool) ModelSpec() model.ToolSpec { return w.base.ModelSpec() }
+func (w *wrappedTool) Spec() tool.Spec             { return w.base.Spec() }
+func (w *wrappedTool) DelegatesToolDispatch() bool { return true }
+func (w *wrappedTool) ModelSpec() model.ToolSpec   { return w.base.ModelSpec() }
 func (w *wrappedTool) Call(ctx context.Context, input json.RawMessage) (tool.Result, error) {
-	var next ToolHandler = func(ctx context.Context, in ToolInvocation) (tool.Result, error) { return in.Tool.Call(ctx, in.Input) }
+	var next ToolHandler = func(ctx context.Context, in ToolInvocation) (tool.Result, error) {
+		return tool.CallAndCollect(ctx, in.Tool, in.Input, nil)
+	}
 	for i := len(w.calls) - 1; i >= 0; i-- {
 		next = w.calls[i](next)
 	}

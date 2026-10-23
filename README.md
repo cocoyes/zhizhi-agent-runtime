@@ -1,5 +1,7 @@
 # zhizhi-agent-runtime
 
+See [runtime stability and migration](docs/runtime-stability.md) for the shared planning contract, opt-in initial recovery, hard call budgets, and checkpoint v2.
+
 <p align="center">
   <img src="zhizhi-logo.png" alt="Zhizhi agent runtime" width="720">
 </p>

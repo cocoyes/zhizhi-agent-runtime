@@ -25,27 +25,13 @@ type Patch struct {
 	Remove  []string `json:"remove_steps,omitempty" jsonschema:"description=IDs of existing steps to remove. All remaining dependencies must stay valid."`
 }
 
-type patchStepReference struct {
-	ID string `json:"id"`
-}
-
-type patchOutput struct {
-	Add     []Step               `json:"add_steps"`
-	Replace []Step               `json:"replace_steps"`
-	Remove  []patchStepReference `json:"remove_steps"`
-}
-
 func decodePatch(text string) (Patch, error) {
-	var decoded patchOutput
-	if err := structuredoutput.Decode(text, &decoded); err != nil {
-		return Patch{}, err
+	var patch Patch
+	if err := structuredoutput.DecodeStrict(text, &patch); err != nil {
+		return Patch{}, invalid("decode", err)
 	}
-	patch := Patch{Add: decoded.Add, Replace: decoded.Replace, Remove: make([]string, 0, len(decoded.Remove))}
-	for _, reference := range decoded.Remove {
-		if reference.ID == "" {
-			return Patch{}, fmt.Errorf("remove_steps contains an empty step id")
-		}
-		patch.Remove = append(patch.Remove, reference.ID)
+	if err := validateCandidateSchema[Patch](text); err != nil {
+		return Patch{}, err
 	}
 	if len(patch.Add) == 0 && len(patch.Replace) == 0 && len(patch.Remove) == 0 {
 		return Patch{}, fmt.Errorf("patch contains no changes")
@@ -58,15 +44,37 @@ func decodePatch(text string) (Patch, error) {
 			if step.ID == "" {
 				return Patch{}, fmt.Errorf("%s contains a step with an empty id", group.name)
 			}
-			if step.Capability == "" {
-				return Patch{}, fmt.Errorf("%s step %q has an empty capability", group.name, step.ID)
+			if err := validateStepMode(step); err != nil {
+				return Patch{}, err
 			}
 		}
+	}
+	for i := range patch.Add {
+		patch.Add[i] = normalizeStep(patch.Add[i])
+	}
+	for i := range patch.Replace {
+		patch.Replace[i] = normalizeStep(patch.Replace[i])
 	}
 	return patch, nil
 }
 
 func (p Patch) Apply(source Plan) (Plan, error) {
+	if err := source.Validate(); err != nil {
+		return Plan{}, err
+	}
+	seen := map[string]bool{}
+	ids := append([]string(nil), p.Remove...)
+	for _, group := range [][]Step{p.Add, p.Replace} {
+		for _, step := range group {
+			ids = append(ids, step.ID)
+		}
+	}
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			return Plan{}, fmt.Errorf("replan: empty or conflicting patch step IDs")
+		}
+		seen[id] = true
+	}
 	steps := make(map[string]Step, len(source.Steps))
 	for _, step := range source.Steps {
 		steps[step.ID] = step
@@ -89,7 +97,7 @@ func (p Patch) Apply(source Plan) (Plan, error) {
 		}
 		steps[step.ID] = step
 	}
-	out := Plan{Version: source.Version + 1, Steps: make([]Step, 0, len(steps))}
+	out := Plan{ID: source.ID, Goal: source.Goal, Version: source.Version + 1, Steps: make([]Step, 0, len(steps))}
 	for _, step := range steps {
 		out.Steps = append(out.Steps, step)
 	}
@@ -100,16 +108,39 @@ func (p Patch) Apply(source Plan) (Plan, error) {
 // has not explicitly authorized. A model-generated patch is never itself
 // evidence that two capabilities are interchangeable.
 func ValidatePatchCompatibility(source Plan, patch Patch, tools []model.ToolSpec) error {
-	if len(tools) == 0 {
-		return nil
-	}
 	before := make(map[string]Step, len(source.Steps))
 	for _, step := range source.Steps {
 		before[step.ID] = step
 	}
 	for _, replacement := range patch.Replace {
 		original, ok := before[replacement.ID]
-		if !ok || original.Capability == replacement.Capability {
+		if !ok {
+			continue
+		}
+		if effectiveMode(original.Mode) != effectiveMode(replacement.Mode) {
+			return fmt.Errorf("REPLAN_INCOMPATIBLE_MODE_REPLACEMENT")
+		}
+		if effectiveMode(original.Mode) == StepModeAgentic {
+			for _, capability := range replacement.Capabilities {
+				allowed := containsCapability(original.Capabilities, capability, capability)
+				if !allowed && len(tools) > 0 {
+					to, ok := findTool(tools, capability)
+					if ok {
+						for _, old := range original.Capabilities {
+							from, found := findTool(tools, old)
+							if found && from.Function.Name == to.Function.Name {
+								allowed = true
+							}
+						}
+					}
+				}
+				if !allowed {
+					return fmt.Errorf("REPLAN_INCOMPATIBLE_AGENTIC_ALLOWLIST")
+				}
+			}
+			continue
+		}
+		if original.Capability == replacement.Capability || len(tools) == 0 {
 			continue
 		}
 		from, fromOK := findTool(tools, original.Capability)
@@ -138,9 +169,13 @@ func weakensEffect(before, after string) bool {
 }
 
 type ModelReplanner struct {
-	Model  model.Model
-	Prompt string
-	Trace  func(event string, details map[string]any)
+	// DisableOutputTool supports providers that cannot accept union tool schemas.
+	DisableOutputTool bool
+	// MaxRepairAttempts defaults to one when nil; an explicit zero disables repair.
+	MaxRepairAttempts *int
+	Model             model.Model
+	Prompt            string
+	Trace             func(event string, details map[string]any)
 }
 
 const patchOutputToolName = "zhizhi_emit_plan_patch"
@@ -163,78 +198,32 @@ func (r *ModelReplanner) Replan(ctx context.Context, input Input) (Patch, error)
 	if marshalErr != nil {
 		return Patch{}, fmt.Errorf("replanner: encode input: %w", marshalErr)
 	}
-	outputTool, err := structuredoutput.ToolFor[Patch](patchOutputToolName, "Return a patch for the existing plan. add_steps and replace_steps contain complete step objects directly; remove_steps contains existing step ID strings.")
+	outputTool, err := outputTool[Patch](patchOutputToolName, "Return a patch for the existing plan. add_steps and replace_steps contain complete step objects directly; remove_steps contains existing step ID strings.")
 	if err != nil {
 		return Patch{}, fmt.Errorf("replanner: build output schema: %w", err)
 	}
-	useToolOutput := r.Model.Capabilities().ToolCalling
 	messages := []model.Message{{Role: model.RoleSystem, Content: prompt}, {Role: model.RoleUser, Content: string(b)}}
 	// The only callable tool here is the synthetic typed output channel. Domain
 	// tools remain catalog data and cannot be executed during replanning.
 	r.trace("model.request", map[string]any{"messages": messages, "output_tool": outputTool})
-	out, err := r.Model.Generate(ctx, replanModelInput(messages, outputTool, useToolOutput))
-	if err != nil {
-		return Patch{}, fmt.Errorf("replanner model: %w", err)
-	}
-	if out == nil {
-		return Patch{}, fmt.Errorf("replanner model returned nil output")
-	}
-	r.trace("model.completed", map[string]any{"content": out.Text, "reasoning_content": out.ReasoningContent, "tool_call_requests": out.ToolCalls})
-	candidate, candidateErr := structuredoutput.Candidate(out, patchOutputToolName, useToolOutput)
-	for repairAttempt := 0; ; repairAttempt++ {
-		var patch Patch
-		decodeErr := candidateErr
-		if decodeErr == nil {
-			patch, decodeErr = decodePatch(candidate)
+	return generateCandidate(ctx, r.Model, "replan", r.MaxRepairAttempts, r.Model.Capabilities().ToolCalling && !r.DisableOutputTool, messages, outputTool, r.trace, func(candidate string) (Patch, error) {
+		patch, err := decodePatch(candidate)
+		if err == nil {
+			err = ValidatePatchCompatibility(input.Original, patch, input.Tools)
 		}
-		if decodeErr == nil {
-			decodeErr = ValidatePatchCompatibility(input.Original, patch, input.Tools)
-		}
-		if decodeErr == nil {
+		if err == nil {
 			var patched Plan
-			patched, decodeErr = patch.Apply(input.Original)
-			if decodeErr == nil {
-				decodeErr = ValidateAgainstTools(patched, input.Tools)
+			patched, err = patch.Apply(input.Original)
+			if err == nil {
+				err = ValidateAgainstTools(patched, input.Tools)
 			}
 		}
-		if decodeErr == nil {
-			return patch, nil
-		}
-		if repairAttempt >= 2 {
-			return Patch{}, fmt.Errorf("replanner: invalid patch after repair: %w; candidate=%q", decodeErr, compactCandidate(candidate))
-		}
-		repairRequest := string(b) + "\nInvalid candidate:\n" + candidate + "\nValidation error:\n" + decodeErr.Error()
-		r.trace("repair.request", map[string]any{"content": repairRequest})
-		repairMessages := []model.Message{{Role: model.RoleSystem, Content: "Call the required patch output tool again after correcting the validation error. add_steps and replace_steps contain complete step objects directly, never {from,to} wrappers. remove_steps contains existing step ID strings. The patched plan must preserve valid dependencies."}, {Role: model.RoleUser, Content: repairRequest}}
-		repair, repairErr := r.Model.Generate(ctx, replanModelInput(repairMessages, outputTool, useToolOutput))
-		if repairErr != nil {
-			return Patch{}, fmt.Errorf("replanner: invalid patch: %w", decodeErr)
-		}
-		if repair == nil {
-			return Patch{}, fmt.Errorf("replanner repair model returned nil output")
-		}
-		r.trace("repair.completed", map[string]any{"content": repair.Text, "reasoning_content": repair.ReasoningContent, "tool_call_requests": repair.ToolCalls})
-		candidate, candidateErr = structuredoutput.Candidate(repair, patchOutputToolName, useToolOutput)
-	}
-}
-
-func replanModelInput(messages []model.Message, outputTool model.ToolSpec, useTool bool) model.ModelInput {
-	if useTool {
-		return model.ModelInput{Messages: messages, Tools: []model.ToolSpec{outputTool}, ToolChoice: model.ToolChoiceForced}
-	}
-	return model.ModelInput{Messages: messages, JSONMode: true}
+		return patch, err
+	})
 }
 
 func (r *ModelReplanner) trace(event string, details map[string]any) {
 	if r.Trace != nil {
 		r.Trace(event, details)
 	}
-}
-
-func compactCandidate(value string) string {
-	const limit = 2048
-	if len(value) > limit {
-		return value[:limit] + "..."
-	}
-	return value
 }

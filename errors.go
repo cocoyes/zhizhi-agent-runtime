@@ -5,6 +5,9 @@ import (
 	"errors"
 	"io"
 	"strings"
+
+	"github.com/cocoyes/zhizhi-agent-runtime/internal/budget"
+	"github.com/cocoyes/zhizhi-agent-runtime/plan"
 )
 
 // ErrorClass identifies the runtime boundary that produced an error.
@@ -24,6 +27,14 @@ type RuntimeError struct {
 
 func (e *RuntimeError) Error() string { return e.Message }
 func (e *RuntimeError) Unwrap() error { return e.Cause }
+
+type safeOperationError struct {
+	message string
+	cause   error
+}
+
+func (e *safeOperationError) Error() string { return e.message }
+func (e *safeOperationError) Unwrap() error { return e.cause }
 
 const (
 	ErrorClassConfig     ErrorClass = "config"
@@ -59,21 +70,48 @@ func standardizeError(operation string, err error) error {
 	}
 	class, code := ErrorClassRuntime, "RUNTIME_ERROR"
 	cause := err
+	var structuredOutput *plan.StructuredOutputError
+	var modelFailure *modelCallError
+	var planningModelFailure *plan.ModelError
 	switch {
 	case errors.Is(err, context.Canceled):
 		class, code = ErrorClassCancelled, "CANCELLED"
 	case errors.Is(err, context.DeadlineExceeded):
 		class, code = ErrorClassTimeout, "DEADLINE_EXCEEDED"
-	case strings.Contains(err.Error(), "budget:"):
+	case errors.Is(err, budget.Exceeded), errors.Is(err, ErrBudgetExceeded), strings.Contains(err.Error(), "budget:"):
 		class, code, cause = ErrorClassBudget, "BUDGET_EXCEEDED", errors.Join(ErrBudgetExceeded, err)
 	case strings.Contains(err.Error(), "tool not found"):
 		class, code, cause = ErrorClassTool, "TOOL_NOT_FOUND", errors.Join(ErrToolNotFound, err)
 	case strings.Contains(err.Error(), "agent is closed"):
 		class, code, cause = ErrorClassRuntime, "AGENT_CLOSED", errors.Join(ErrAgentClosed, err)
+	case errors.As(err, &modelFailure), errors.As(err, &planningModelFailure):
+		class, code = ErrorClassModel, "MODEL_ERROR"
+	case errors.As(err, &structuredOutput):
+		class, code = ErrorClassPlan, "PLAN_STRUCTURED_OUTPUT"
 	case strings.Contains(err.Error(), "model"):
 		class, code = ErrorClassModel, "MODEL_ERROR"
 	case strings.Contains(err.Error(), "plan"):
 		class, code = ErrorClassPlan, "PLAN_ERROR"
+	case strings.Contains(err.Error(), "tool "):
+		class, code = ErrorClassTool, "TOOL_ERROR"
 	}
-	return &RuntimeError{Code: code, Class: class, Operation: operation, Message: err.Error(), Cause: cause}
+	message := err.Error()
+	switch class {
+	case ErrorClassModel:
+		message = "model request failed"
+	case ErrorClassTool:
+		message = "tool invocation failed"
+	case ErrorClassPlan:
+		message = "plan validation or execution failed"
+		if structuredOutput != nil {
+			message = structuredOutput.Error()
+		}
+	case ErrorClassBudget:
+		message = "budget exceeded"
+	case ErrorClassCancelled:
+		message = "request cancelled"
+	case ErrorClassTimeout:
+		message = "request deadline exceeded"
+	}
+	return &RuntimeError{Code: code, Class: class, Operation: operation, Message: message, Cause: cause}
 }

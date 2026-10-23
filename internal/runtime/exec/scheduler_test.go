@@ -36,6 +36,26 @@ func TestSchedulerRunsBatchConcurrently(t *testing.T) {
 	}
 }
 
+func TestApprovalResumesExactFallbackWithoutEarlierDispatch(t *testing.T) {
+	firstCalls, fallbackCalls := 0, 0
+	first := tool.Func("a_first", "first", func(context.Context, struct{}) (string, error) { firstCalls++; return "", errors.New("unavailable") }, tool.WithCapabilities("cap"))
+	fallback := tool.Func("b_fallback", "fallback", func(context.Context, struct{}) (string, error) { fallbackCalls++; return "ok", nil }, tool.WithCapabilities("cap"), tool.WithConfirmation(tool.ConfirmationAlways))
+	execution, err := Compile(plan.Plan{Steps: []plan.Step{{ID: "step", Capability: "cap"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := Scheduler{Registry: tool.NewRegistry(first, fallback), Approvals: map[string]Approval{"step": {ToolID: "b_fallback", Arguments: json.RawMessage(`{}`)}}}
+	results, err := s.Run(context.Background(), execution, nil)
+	if err != nil || firstCalls != 0 || fallbackCalls != 1 || len(results) != 1 || results[0].ToolID != "b_fallback" {
+		t.Fatalf("wrong approved dispatch: %+v err=%v first=%d fallback=%d", results, err, firstCalls, fallbackCalls)
+	}
+	s.Approvals["step"] = Approval{ToolID: "b_fallback", Arguments: json.RawMessage(`{"changed":true}`)}
+	_, err = s.Run(context.Background(), execution, nil)
+	if err == nil || firstCalls != 0 || fallbackCalls != 1 {
+		t.Fatal("mismatched approval dispatched a tool")
+	}
+}
+
 func TestSchedulerOptionalFailureDoesNotAbort(t *testing.T) {
 	failing := tool.Func("optional", "optional", func(context.Context, struct{}) (string, error) { return "", errors.New("unavailable") }, tool.WithCapabilities("optional"))
 	succeeding := tool.Func("required", "required", func(context.Context, struct{}) (string, error) { return "ok", nil }, tool.WithCapabilities("required"))

@@ -15,7 +15,9 @@ import (
 	"github.com/cocoyes/zhizhi-agent-runtime/model"
 )
 
-const CurrentVersion = 1
+// Version 2 persists request consumption and the original absolute deadline.
+// Version 1 cannot be resumed safely because complex calls were not accounted.
+const CurrentVersion = 2
 
 var (
 	ErrNotFound            = errors.New("checkpoint: not found")
@@ -34,6 +36,11 @@ type BudgetUsage struct {
 	ModelCalls int `json:"model_calls"`
 	ToolCalls  int `json:"tool_calls"`
 	Replans    int `json:"replans"`
+}
+
+type BudgetLimits struct {
+	MaxModelCalls int `json:"max_model_calls"`
+	MaxToolCalls  int `json:"max_tool_calls"`
 }
 
 type PendingInvocation struct {
@@ -56,6 +63,8 @@ type Checkpoint struct {
 	Actions            []contract.ActionReceipt `json:"actions,omitempty"`
 	Pending            *PendingInvocation       `json:"pending,omitempty"`
 	Budget             BudgetUsage              `json:"budget"`
+	Limits             BudgetLimits             `json:"limits"`
+	Deadline           time.Time                `json:"deadline,omitempty"`
 	State              json.RawMessage          `json:"state,omitempty"`
 	CreatedAt          time.Time                `json:"created_at"`
 	UpdatedAt          time.Time                `json:"updated_at"`
@@ -68,12 +77,18 @@ func (c Checkpoint) Validate() error {
 	if c.ID == "" || c.RunID == "" {
 		return errors.New("checkpoint: id and run id are required")
 	}
+	if c.Budget.ModelCalls < 0 || c.Budget.ToolCalls < 0 || c.Budget.Replans < 0 || c.Limits.MaxModelCalls < 0 || c.Limits.MaxToolCalls < 0 {
+		return errors.New("checkpoint: negative budget values")
+	}
 	return nil
 }
 
 type Store interface {
 	Save(context.Context, Checkpoint) error
 	Load(context.Context, string) (*Checkpoint, error)
+	// Delete must atomically remove an existing checkpoint and return ErrNotFound
+	// when absent. Resume uses this as a single-use authorization claim before
+	// dispatch, including across runtime instances sharing a durable store.
 	Delete(context.Context, string) error
 }
 

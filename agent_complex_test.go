@@ -143,7 +143,7 @@ func TestComplexRunReplansOnceAfterRequiredFailure(t *testing.T) {
 	failing := tool.Func("weather", "weather", func(context.Context, struct {
 		City string `json:"city"`
 	}) (string, error) {
-		return "", context.Canceled
+		return "", errors.New("required read failed")
 	}, tool.WithCapabilities("weather.current"))
 	m := &complexModel{}
 	rp := &recoveryPlanner{}
@@ -155,6 +155,22 @@ func TestComplexRunReplansOnceAfterRequiredFailure(t *testing.T) {
 	out, err := a.Run(context.Background(), Request{Input: "安排今晚", Mode: &mode})
 	if err != nil || !rp.called || out.Replans != 1 || out.PlanSteps != 0 {
 		t.Fatalf("unexpected replan response: %+v %v", out, err)
+	}
+}
+
+func TestComplexCancelledStepDoesNotReplan(t *testing.T) {
+	failing := tool.Func("weather", "weather", func(context.Context, struct {
+		City string `json:"city"`
+	}) (string, error) { return "", context.Canceled }, tool.WithCapabilities("weather.current"))
+	rp := &recoveryPlanner{}
+	a, err := New(WithModel(&complexModel{}), WithTools(failing), WithPlanner(fixedPlanner{}), WithReplanner(rp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mode := RunModeAgentComplex
+	_, err = a.Run(context.Background(), Request{Input: "plan", Mode: &mode})
+	if !errors.Is(err, context.Canceled) || rp.called {
+		t.Fatalf("cancelled execution replanned: %v replan=%v", err, rp.called)
 	}
 }
 

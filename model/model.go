@@ -96,6 +96,17 @@ func UserMessage(parts ...ContentPart) Message {
 func AssistantMessage(text string) Message { return TextMessage(RoleAssistant, text) }
 func SystemMessage(text string) Message    { return TextMessage(RoleSystem, text) }
 
+// NamedMessage tags a text message with the participant name that providers
+// such as OpenAI-compatible endpoints accept on the "name" wire field. The
+// name lets a caller distinguish several participants sharing one role, for
+// example multiple users contributing to the same conversation.
+func NamedMessage(role Role, name, text string) Message {
+	return Message{Role: role, Content: text, Name: name}
+}
+
+// NamedUserMessage is NamedMessage fixed to the user role.
+func NamedUserMessage(name, text string) Message { return NamedMessage(RoleUser, name, text) }
+
 func TextPart(text string) ContentPart { return ContentPart{Type: ContentText, Text: text} }
 func ImageURLPart(url, detail string) ContentPart {
 	return ContentPart{Type: ContentImageURL, URL: url, Detail: detail}

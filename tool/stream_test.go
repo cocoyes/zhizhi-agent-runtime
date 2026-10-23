@@ -3,8 +3,11 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"testing"
+
+	"github.com/cocoyes/zhizhi-agent-runtime/internal/budget"
 )
 
 type testStreamTool struct{ Tool }
@@ -46,5 +49,27 @@ func TestStreamWrapsOrdinaryTool(t *testing.T) {
 	event, err := stream.Recv(context.Background())
 	if err != nil || event.Result == nil || event.Result.Content != "done" {
 		t.Fatalf("unexpected event: %+v %v", event, err)
+	}
+}
+
+func TestDispatchBudgetAndValidation(t *testing.T) {
+	ledger := budget.New(0, 1)
+	ctx := budget.WithLedger(context.Background(), ledger)
+	base := Func("stream", "stream", func(context.Context, struct{}) (string, error) { return "ok", nil })
+	value := testStreamTool{Tool: base}
+	if _, err := CallAndCollect(ctx, value, json.RawMessage(`[]`), nil); err == nil {
+		t.Fatal("invalid input dispatched")
+	}
+	if ledger.Snapshot().ToolCalls != 0 {
+		t.Fatal("validation consumed dispatch quota")
+	}
+	if _, err := CallAndCollect(ctx, value, json.RawMessage(`{}`), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Stream(ctx, value, json.RawMessage(`{}`)); !errors.Is(err, budget.Exceeded) {
+		t.Fatalf("second dispatch = %v", err)
+	}
+	if ledger.Snapshot().ToolCalls != 1 {
+		t.Fatal("stream chunks counted as dispatches")
 	}
 }

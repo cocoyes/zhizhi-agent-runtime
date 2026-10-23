@@ -6,7 +6,28 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/cocoyes/zhizhi-agent-runtime/internal/budget"
 )
+
+// DispatchDelegator marks wrappers which forward each actual dispatch through
+// CallAndCollect or Stream. Such wrappers must not reserve a second quota slot.
+type DispatchDelegator interface {
+	DelegatesToolDispatch() bool
+}
+
+func reserveDispatch(ctx context.Context, value Tool, input json.RawMessage) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := ValidateInput(value.Spec(), input); err != nil {
+		return err
+	}
+	if delegator, ok := value.(DispatchDelegator); ok && delegator.DelegatesToolDispatch() {
+		return nil
+	}
+	return budget.FromContext(ctx).ReserveTool("tool.dispatch")
+}
 
 // CollectingTool customizes aggregation while preserving streaming deltas.
 // Middleware wrappers use this to intercept a logical invocation once.
@@ -18,6 +39,9 @@ type CollectingTool interface {
 // CallAndCollect invokes either kind of tool and aggregates a streaming tool
 // for non-streaming callers. onDelta may be nil.
 func CallAndCollect(ctx context.Context, value Tool, input json.RawMessage, onDelta func(any)) (Result, error) {
+	if err := reserveDispatch(ctx, value, input); err != nil {
+		return Result{}, err
+	}
 	if collecting, ok := value.(CollectingTool); ok {
 		return collecting.CallAndCollect(ctx, input, onDelta)
 	}
@@ -83,6 +107,9 @@ func (s *singleResultStream) Close() error { s.done = true; return nil }
 
 // Stream wraps an ordinary tool result in a one-event stream.
 func Stream(ctx context.Context, value Tool, input json.RawMessage) (ToolStream, error) {
+	if err := reserveDispatch(ctx, value, input); err != nil {
+		return nil, err
+	}
 	if streamable, ok := value.(StreamableTool); ok {
 		return streamable.Stream(ctx, input)
 	}

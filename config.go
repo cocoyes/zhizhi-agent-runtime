@@ -29,16 +29,17 @@ type FileAgentConfig struct {
 	SystemPrompt string `yaml:"system_prompt"`
 }
 type FileRuntimeConfig struct {
-	Profile          string        `yaml:"profile"`
-	MaxSteps         int           `yaml:"max_steps"`
-	MaxBatches       int           `yaml:"max_batches"`
-	MaxModelCalls    int           `yaml:"max_model_calls"`
-	MaxToolCalls     int           `yaml:"max_tool_calls"`
-	MaxReplans       int           `yaml:"max_replans"`
-	MaxParallelSteps int           `yaml:"max_parallel_steps"`
-	TargetLatency    time.Duration `yaml:"target_latency"`
-	OptionalCutoff   time.Duration `yaml:"optional_cutoff"`
-	HardTimeout      time.Duration `yaml:"hard_timeout"`
+	PlannerRecovery  PlannerRecoveryPolicy `yaml:"planner_recovery"`
+	Profile          string                `yaml:"profile"`
+	MaxSteps         int                   `yaml:"max_steps"`
+	MaxBatches       int                   `yaml:"max_batches"`
+	MaxModelCalls    int                   `yaml:"max_model_calls"`
+	MaxToolCalls     int                   `yaml:"max_tool_calls"`
+	MaxReplans       int                   `yaml:"max_replans"`
+	MaxParallelSteps int                   `yaml:"max_parallel_steps"`
+	TargetLatency    time.Duration         `yaml:"target_latency"`
+	OptionalCutoff   time.Duration         `yaml:"optional_cutoff"`
+	HardTimeout      time.Duration         `yaml:"hard_timeout"`
 }
 type FileMCPConfig struct {
 	Servers []FileMCPServer `yaml:"servers"`
@@ -73,6 +74,7 @@ func Load(path string) (Agent, error) {
 		return nil, fmt.Errorf("config: model.base_url and model.model are required")
 	}
 	options := []Option{WithModel(openaicompat.New(openaicompat.Config{BaseURL: file.Model.BaseURL, APIKey: file.Model.APIKey, Model: file.Model.Model, Thinking: file.Model.Thinking, ReasoningEffort: file.Model.ReasoningEffort})), WithSystemPrompt(file.Agent.SystemPrompt), WithBudget(Budget{MaxSteps: file.Runtime.MaxSteps, MaxBatches: file.Runtime.MaxBatches, MaxModelCalls: file.Runtime.MaxModelCalls, MaxToolCalls: file.Runtime.MaxToolCalls, MaxReplans: file.Runtime.MaxReplans, MaxParallelSteps: file.Runtime.MaxParallelSteps, TargetLatency: file.Runtime.TargetLatency, OptionalCutoff: file.Runtime.OptionalCutoff, HardTimeout: file.Runtime.HardTimeout})}
+	options = append(options, WithPlannerRecovery(file.Runtime.PlannerRecovery))
 	for _, server := range file.MCP.Servers {
 		transport := runtimemcp.Transport(server.Transport)
 		if transport == "" {

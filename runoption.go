@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cocoyes/zhizhi-agent-runtime/internal/budget"
 	"github.com/cocoyes/zhizhi-agent-runtime/middleware"
 	"github.com/cocoyes/zhizhi-agent-runtime/model"
 	"github.com/cocoyes/zhizhi-agent-runtime/observe"
@@ -44,6 +45,7 @@ type runConfig struct {
 	agentMiddleware       []AgentMiddleware
 	model                 model.Model
 	counter               *modelCounter
+	ledger                *budget.Ledger
 }
 
 func WithRunTools(values ...tool.Tool) RunOption {
@@ -117,6 +119,9 @@ func (r *runtime) newRunConfig(options []RunOption) (runConfig, *tool.Registry, 
 		}
 	}
 	values := append(r.registry.Tools(), cfg.tools...)
+	if cfg.toolChoice == model.ToolChoiceForbidden {
+		values = nil
+	}
 	if cfg.filter != nil {
 		filtered := values[:0]
 		for _, value := range values {
@@ -136,8 +141,35 @@ func (r *runtime) newRunConfig(options []RunOption) (runConfig, *tool.Registry, 
 	if err := registry.Validate(); err != nil {
 		return runConfig{}, nil, fmt.Errorf("run tools: %w", err)
 	}
-	wrappedModel := middleware.WrapModel(r.cfg.model, cfg.modelMiddleware, cfg.modelStreamMiddleware)
-	cfg.counter = &modelCounter{base: wrappedModel}
-	cfg.model = cfg.counter
+	cfg.counter = &modelCounter{base: r.cfg.model}
+	cfg.ledger = budget.New(r.cfg.budget.MaxModelCalls, r.cfg.budget.MaxToolCalls)
+	cfg.model = middleware.WrapModel(cfg.counter,
+		append(append([]middleware.ModelMiddleware(nil), r.cfg.modelMiddleware...), cfg.modelMiddleware...),
+		append(append([]middleware.ModelStreamMiddleware(nil), r.cfg.modelStreamMiddleware...), cfg.modelStreamMiddleware...))
 	return cfg, registry, nil
+}
+
+// addSelectedTools applies the same request filter and middleware to tools
+// discovered after the request model configuration has been constructed.
+func (r *runtime) addSelectedTools(cfg runConfig, registry *tool.Registry, selected []tool.Tool) (*tool.Registry, error) {
+	if cfg.toolChoice == model.ToolChoiceForbidden {
+		return registry, nil
+	}
+	values := append([]tool.Tool(nil), registry.Tools()...)
+	calls := append(append([]middleware.ToolMiddleware(nil), r.cfg.toolMiddleware...), cfg.toolMiddleware...)
+	streams := append(append([]middleware.ToolStreamMiddleware(nil), r.cfg.toolStreamMiddleware...), cfg.toolStreamMiddleware...)
+	for _, value := range selected {
+		if value == nil {
+			continue
+		}
+		if cfg.filter != nil && !cfg.filter(value.Spec()) {
+			continue
+		}
+		values = append(values, middleware.WrapTool(value, calls, streams))
+	}
+	registry = tool.NewRegistry(values...)
+	if err := registry.Validate(); err != nil {
+		return nil, fmt.Errorf("run tools: %w", err)
+	}
+	return registry, nil
 }

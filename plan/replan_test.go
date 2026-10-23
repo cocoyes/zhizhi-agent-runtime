@@ -7,9 +7,9 @@ import (
 	"testing"
 )
 
-func TestPatchAcceptsObjectRemoveEntriesAndSingleStepObjects(t *testing.T) {
-	patch, err := decodePatch("```json\n{remove_steps: [{id: 'failed'}], add_steps: [{id: 'fallback', capability: 'cached'}]}\n```")
-	if err != nil || len(patch.Remove) != 1 || patch.Remove[0] != "failed" || len(patch.Add) != 1 || patch.Add[0].ID != "fallback" {
+func TestPatchRejectsObjectRemoveEntries(t *testing.T) {
+	patch, err := decodePatch("```json\n{remove_steps: [{id: 'failed'}], add_steps: [{id: 'fallback', mode: 'tool', capability: 'cached'}]}\n```")
+	if err == nil {
 		t.Fatalf("unexpected tolerant patch: %+v err=%v", patch, err)
 	}
 }
@@ -25,7 +25,7 @@ func (s *replanToolCallingScripted) Generate(_ context.Context, input model.Mode
 	var call model.ToolCallRequest
 	call.Type = "function"
 	call.Function.Name = patchOutputToolName
-	call.Function.Arguments = `{"replace_steps":[{"id":"failed","capability":"cached"}]}`
+	call.Function.Arguments = `{"replace_steps":[{"id":"failed","mode":"tool","capability":"cached"}]}`
 	return &model.ModelOutput{ToolCalls: []model.ToolCallRequest{call}}, nil
 }
 func (s *replanToolCallingScripted) Stream(context.Context, model.ModelInput) (model.Stream, error) {
@@ -55,7 +55,7 @@ func TestPatchAcceptsStringRemoveEntriesThroughTargetShape(t *testing.T) {
 }
 
 func TestDecodePatchRejectsReplacementWithoutID(t *testing.T) {
-	if _, err := decodePatch(`{"replace_steps":[{"capability":"cached"}]}`); err == nil {
+	if _, err := decodePatch(`{"replace_steps":[{"mode":"tool","capability":"cached"}]}`); err == nil {
 		t.Fatal("expected replacement without id to be rejected")
 	}
 }
@@ -98,7 +98,7 @@ func (s *replanRepairScripted) Generate(context.Context, model.ModelInput) (*mod
 	if s.calls == 1 {
 		return &model.ModelOutput{Text: `{}`}, nil
 	}
-	return &model.ModelOutput{Text: `{"replace_steps":[{"id":"failed","capability":"cached"}]}`}, nil
+	return &model.ModelOutput{Text: `{"replace_steps":[{"id":"failed","mode":"tool","capability":"cached"}]}`}, nil
 }
 func (s *replanRepairScripted) Stream(context.Context, model.ModelInput) (model.Stream, error) {
 	return nil, nil

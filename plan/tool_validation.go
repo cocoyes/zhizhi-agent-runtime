@@ -15,6 +15,9 @@ import (
 // before execution so malformed model plans consume repair attempts rather
 // than runtime replan budget.
 func ValidateAgainstTools(value Plan, tools []model.ToolSpec) error {
+	if err := value.Validate(); err != nil {
+		return err
+	}
 	// A nil catalog is supported for custom/offline planners that deliberately
 	// operate without tool metadata. Runtime entry points always pass the real
 	// registry, where full invocation validation remains mandatory.
@@ -25,13 +28,21 @@ func ValidateAgainstTools(value Plan, tools []model.ToolSpec) error {
 	for _, step := range value.Steps {
 		steps[step.ID] = step
 	}
-	for _, step := range value.Steps {
-		if step.Mode == StepModeAgentic {
+	for index, step := range value.Steps {
+		if err := validateConditionAgainstTools(step, steps, tools); err != nil {
+			return err
+		}
+		if effectiveMode(step.Mode) == StepModeAgentic {
+			for capabilityIndex, capability := range step.Capabilities {
+				if _, ok := findTool(tools, capability); !ok {
+					return invalidAt("capability_reference", fmt.Sprintf("/steps/%d/capabilities/%d", index, capabilityIndex), fmt.Errorf("plan: agentic capability has no tool"))
+				}
+			}
 			continue
 		}
 		spec, ok := findTool(tools, step.Capability)
 		if !ok {
-			return fmt.Errorf("plan: step %q capability %q has no tool", step.ID, step.Capability)
+			return invalidAt("capability_reference", fmt.Sprintf("/steps/%d/capability", index), fmt.Errorf("plan: capability has no tool"))
 		}
 		input := step.Input
 		if input == nil {
@@ -76,23 +87,27 @@ func ValidateAgainstTools(value Plan, tools []model.ToolSpec) error {
 				return fmt.Errorf("plan: step %q required input %q is not provided by input or bindings", step.ID, missing)
 			}
 		}
-		if step.Condition != nil {
-			sourceStep := steps[step.Condition.SourceStep]
-			sourceSpec, found := findTool(tools, sourceStep.Capability)
-			if !found {
-				return fmt.Errorf("plan: condition source step %q has no tool", step.Condition.SourceStep)
-			}
-			node, ok := schemaAt(sourceSpec.OutputSchema, step.Condition.SourcePath)
-			if !ok {
-				return fmt.Errorf("plan: step %q condition source path %q is absent from step %q output schema", step.ID, step.Condition.SourcePath, step.Condition.SourceStep)
-			}
-			conditionValue := step.Condition.Equals
-			if step.Condition.NotEquals != nil {
-				conditionValue = step.Condition.NotEquals
-			}
-			if schemaType, _ := node["type"].(string); schemaType != "" && !conditionTypeMatches(schemaType, conditionValue) {
-				return fmt.Errorf("plan: step %q condition value type does not match source path %q type %s", step.ID, step.Condition.SourcePath, schemaType)
-			}
+	}
+	return nil
+}
+
+func validateConditionAgainstTools(step Step, steps map[string]Step, tools []model.ToolSpec) error {
+	if step.Condition != nil {
+		sourceStep := steps[step.Condition.SourceStep]
+		sourceSpec, found := findTool(tools, sourceStep.Capability)
+		if !found {
+			return fmt.Errorf("plan: condition source step %q has no tool", step.Condition.SourceStep)
+		}
+		node, ok := schemaAt(sourceSpec.OutputSchema, step.Condition.SourcePath)
+		if !ok {
+			return fmt.Errorf("plan: step %q condition source path %q is absent from step %q output schema", step.ID, step.Condition.SourcePath, step.Condition.SourceStep)
+		}
+		conditionValue := step.Condition.Equals
+		if step.Condition.NotEquals != nil {
+			conditionValue = step.Condition.NotEquals
+		}
+		if schemaType, _ := node["type"].(string); schemaType != "" && !conditionTypeMatches(schemaType, conditionValue) {
+			return fmt.Errorf("plan: step %q condition value type does not match source path %q type %s", step.ID, step.Condition.SourcePath, schemaType)
 		}
 	}
 	return nil

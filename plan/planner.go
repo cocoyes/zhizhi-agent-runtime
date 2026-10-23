@@ -16,9 +16,13 @@ type Planner interface {
 }
 
 type ModelPlanner struct {
-	Model  model.Model
-	Prompt string
-	Trace  func(event string, details map[string]any)
+	// DisableOutputTool supports providers that cannot accept union tool schemas.
+	DisableOutputTool bool
+	// MaxRepairAttempts defaults to one when nil; an explicit zero disables repair.
+	MaxRepairAttempts *int
+	Model             model.Model
+	Prompt            string
+	Trace             func(event string, details map[string]any)
 }
 
 const planOutputToolName = "zhizhi_emit_plan"
@@ -41,47 +45,14 @@ func (p *ModelPlanner) Plan(ctx context.Context, input string, tools []model.Too
 	// API-level tools here lets many models return a tool call instead of the
 	// requested plan JSON, leaving the planner with empty text.
 	user := input + "\n可用工具目录（仅用于规划，不要调用）：\n" + string(catalog)
-	outputTool, err := structuredoutput.ToolFor[Plan](planOutputToolName, "Return the complete executable plan. The arguments must exactly match this schema.")
+	outputTool, err := outputTool[Plan](planOutputToolName, "Return the complete executable plan. The arguments must exactly match this schema.")
 	if err != nil {
 		return Plan{}, fmt.Errorf("planner: build output schema: %w", err)
 	}
-	useToolOutput := p.Model.Capabilities().ToolCalling
+	useToolOutput := p.Model.Capabilities().ToolCalling && !p.DisableOutputTool
 	modelInput := structuredModelInput([]model.Message{{Role: model.RoleSystem, Content: system}, {Role: model.RoleUser, Content: user}}, outputTool, useToolOutput)
 	p.trace("model.request", map[string]any{"messages": modelInput.Messages, "output_tool": outputTool, "tool_choice": modelInput.ToolChoice})
-	out, err := p.Model.Generate(ctx, modelInput)
-	if err != nil {
-		return Plan{}, fmt.Errorf("planner model: %w", err)
-	}
-	if out == nil {
-		return Plan{}, fmt.Errorf("planner model returned nil output")
-	}
-	p.trace("model.completed", map[string]any{"content": out.Text, "reasoning_content": out.ReasoningContent, "tool_call_requests": out.ToolCalls})
-	candidate, candidateErr := structuredoutput.Candidate(out, planOutputToolName, useToolOutput)
-	for repairAttempt := 0; ; repairAttempt++ {
-		var result Plan
-		decodeErr := candidateErr
-		if decodeErr == nil {
-			result, decodeErr = decodePlan(candidate, tools)
-		}
-		if decodeErr == nil {
-			return result, nil
-		}
-		if repairAttempt >= 2 {
-			return Plan{}, fmt.Errorf("planner: invalid structured output after repair: %w", decodeErr)
-		}
-		repairRequest := user + "\nInvalid candidate:\n" + candidate + "\nValidation error:\n" + decodeErr.Error()
-		p.trace("repair.request", map[string]any{"content": repairRequest})
-		repairMessages := []model.Message{{Role: model.RoleSystem, Content: "Produce the required plan tool call again after correcting the validation error. Preserve intent. Deterministic tool steps need non-empty id and capability fields, dependencies must form an acyclic graph, and every required tool input must be covered by static input or bindings. A binding source_path is legal only when the source tool's output_schema explicitly defines that path. If output_schema is missing, null, or lacks a runtime-observed value required by a later tool, do not guess another path: combine the dependent calls into one mode: \"agentic\" step with a clear goal, success_criteria, the minimum capabilities allowlist, and a finite tool_budget; agentic steps use no bindings. If the later call does not actually depend on the earlier observation, remove the dependency and use static input. Never put {{step.path}} templates in input. Do not pre-plan failure-only fallback steps; runtime replanning handles actual failures."}, {Role: model.RoleUser, Content: repairRequest}}
-		repair, repairErr := p.Model.Generate(ctx, structuredModelInput(repairMessages, outputTool, useToolOutput))
-		if repairErr != nil {
-			return Plan{}, fmt.Errorf("planner: invalid structured output: %w", decodeErr)
-		}
-		if repair == nil {
-			return Plan{}, fmt.Errorf("planner repair model returned nil output")
-		}
-		p.trace("repair.completed", map[string]any{"content": repair.Text, "reasoning_content": repair.ReasoningContent, "tool_call_requests": repair.ToolCalls})
-		candidate, candidateErr = structuredoutput.Candidate(repair, planOutputToolName, useToolOutput)
-	}
+	return generateCandidate(ctx, p.Model, "initial_plan", p.MaxRepairAttempts, useToolOutput, modelInput.Messages, outputTool, p.trace, func(candidate string) (Plan, error) { return decodePlan(candidate, tools) })
 }
 
 func structuredModelInput(messages []model.Message, outputTool model.ToolSpec, useTool bool) model.ModelInput {
@@ -100,6 +71,9 @@ func (p *ModelPlanner) trace(event string, details map[string]any) {
 func decodePlan(text string, tools []model.ToolSpec) (Plan, error) {
 	var result Plan
 	if err := structuredoutput.DecodeStrict(text, &result); err != nil {
+		return Plan{}, invalid("decode", err)
+	}
+	if err := validateCandidateSchema[Plan](text); err != nil {
 		return Plan{}, err
 	}
 	if result.Version == 0 {

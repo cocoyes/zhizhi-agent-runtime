@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/cocoyes/zhizhi-agent-runtime/internal/runtime/react"
 	"github.com/cocoyes/zhizhi-agent-runtime/plan"
 )
 
@@ -27,6 +28,7 @@ type Step struct {
 	ToolBudget      plan.ToolCallBudget
 	ApprovedToolID  string
 	ApprovedInput   []byte
+	Continuation    *react.Continuation
 }
 type Batch struct {
 	Index int

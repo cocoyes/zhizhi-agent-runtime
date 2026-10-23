@@ -12,6 +12,8 @@
 
 [架构与包边界](docs/architecture.md)
 
+[规划稳定性修复与迁移](docs/runtime-stability.md)（统一步骤契约、首次恢复、硬预算和 checkpoint v2）
+
 面向生产环境的 Go Agent Runtime，帮助 Agent 完成规划、工具调用、失败恢复和全过程审计。
 
 1.0.7 新增与普通 LLM 调用解耦的实时双工语音接口，以及支持函数调用的豆包适配器；

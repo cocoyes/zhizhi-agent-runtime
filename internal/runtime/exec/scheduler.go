@@ -10,12 +10,14 @@ import (
 	"time"
 
 	"github.com/cocoyes/zhizhi-agent-runtime/contract"
+	"github.com/cocoyes/zhizhi-agent-runtime/internal/runtime/react"
 	"github.com/cocoyes/zhizhi-agent-runtime/plan"
 	"github.com/cocoyes/zhizhi-agent-runtime/policy"
 	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
 type StepResult struct {
+	Continuation        *react.Continuation
 	StepID              string
 	RequestedCapability string
 	Capability          string
@@ -38,6 +40,7 @@ type StepResult struct {
 
 type InputResolver func(Step) json.RawMessage
 type AgenticResult struct {
+	Continuation     *react.Continuation
 	Content          any
 	Action           *tool.ActionReceipt
 	ToolCalls        int
@@ -84,7 +87,7 @@ type Barrier struct {
 }
 
 func (b *Barrier) acquire(ctx context.Context, spec tool.Spec) error {
-	if b == nil || !spec.IsWrite() {
+	if b == nil || (!spec.IsWrite() && spec.SideEffect != tool.SideEffectUnknown) {
 		return nil
 	}
 	for {
@@ -103,7 +106,7 @@ func (b *Barrier) acquire(ctx context.Context, spec tool.Spec) error {
 	}
 }
 func (b *Barrier) release(spec tool.Spec) {
-	if b != nil && spec.IsWrite() {
+	if b != nil && (spec.IsWrite() || spec.SideEffect == tool.SideEffectUnknown) {
 		b.mu.Lock()
 		b.activeWrite = false
 		b.mu.Unlock()
@@ -190,6 +193,7 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 					}
 					out, runErr := s.Agentic(ctx, current, payload)
 					result.Content, result.Action, result.Err = out.Content, out.Action, runErr
+					result.Continuation = out.Continuation
 					if result.Action != nil {
 						result.ToolID = result.Action.ToolID
 						result.Action.StepID = current.ID
@@ -213,13 +217,6 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 					batchResults[index] = result
 					return
 				}
-				if err := s.Barrier.acquire(ctx, candidates[0].Spec()); err != nil {
-					result.Err = err
-					result.Duration = time.Since(started)
-					batchResults[index] = result
-					return
-				}
-				defer s.Barrier.release(candidates[0].Spec())
 				payload, resolveErr := resolvePayload(current, resolve, evidence)
 				if resolveErr != nil {
 					result.Err = resolveErr
@@ -228,8 +225,43 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 					return
 				}
 				result.Input = append(json.RawMessage(nil), payload...)
-				candidateSpec := candidates[0].Spec()
 				approval, approvedStep := s.Approvals[current.ID]
+				if approvedStep {
+					var approvedTool tool.Tool
+					for _, candidate := range candidates {
+						if candidate.Spec().ID == approval.ToolID {
+							approvedTool = candidate
+							break
+						}
+					}
+					if approvedTool == nil || !jsonEqual(approval.Arguments, payload) {
+						result.Err = errors.New("scheduler: approval does not match authorized tool and exact arguments")
+						batchResults[index] = result
+						return
+					}
+					// Resume the exact pending fallback, without dispatching earlier candidates.
+					candidates = []tool.Tool{approvedTool}
+				}
+				barrierSpec := candidates[0].Spec()
+				for _, candidate := range candidates {
+					if candidate.Spec().IsWrite() || candidate.Spec().SideEffect == tool.SideEffectUnknown {
+						barrierSpec = candidate.Spec()
+						break
+					}
+				}
+				if err := s.Barrier.acquire(ctx, barrierSpec); err != nil {
+					result.Err = err
+					result.Duration = time.Since(started)
+					batchResults[index] = result
+					return
+				}
+				defer s.Barrier.release(barrierSpec)
+				candidateSpec := candidates[0].Spec()
+				if err := tool.ValidateInput(candidateSpec, payload); err != nil {
+					result.Err = err
+					batchResults[index] = result
+					return
+				}
 				approvedStep = approvedStep && approval.ToolID == candidateSpec.ID && jsonEqual(approval.Arguments, payload)
 				if candidateSpec.RequiresConfirmation() && !approvedStep {
 					approved := false
@@ -254,7 +286,26 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 				}
 				runner := s.Policy
 				runner.OnEvent = s.Observe
+				var pendingAction *tool.ActionReceipt
 				runner.BeforeCall = func(candidate tool.Tool) error {
+					if err := tool.ValidateInput(candidate.Spec(), payload); err != nil {
+						return err
+					}
+					if candidate.Spec().ID != candidateSpec.ID && candidate.Spec().RequiresConfirmation() {
+						approved := false
+						if s.Confirm != nil {
+							var err error
+							approved, err = s.Confirm(ctx, candidate.Spec(), payload)
+							if err != nil {
+								return err
+							}
+						}
+						if !approved {
+							now := time.Now().UTC()
+							pendingAction = &tool.ActionReceipt{ToolID: candidate.Spec().ID, Status: contract.ActionConfirmationRequired, ExecutedAt: now, Timestamp: now, Message: "explicit confirmation is required before execution"}
+							return errors.New("scheduler: fallback confirmation required")
+						}
+					}
 					if s.Guard == nil {
 						return nil
 					}
@@ -262,8 +313,11 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 				}
 				out, err := runner.Execute(ctx, candidates, payload)
 				result.ToolID, result.Content, result.Receipt, result.Action, result.Err = out.ToolID, out.Value.Content, out.Value.Receipt, out.Value.Action, err
-				if err != nil && out.ToolID != "" {
-					if invoked, ok := s.Registry.Get(out.ToolID); ok && invoked.Spec().IsWrite() && out.ErrorKind == policy.Ambiguous {
+				if pendingAction != nil {
+					result.Action = pendingAction
+				}
+				if err != nil && out.ToolID != "" && result.Action == nil {
+					if invoked, ok := s.Registry.Get(out.ToolID); ok && (invoked.Spec().IsWrite() || invoked.Spec().SideEffect == tool.SideEffectUnknown) && out.ErrorKind == policy.Ambiguous {
 						now := time.Now().UTC()
 						result.Action = &tool.ActionReceipt{ToolID: out.ToolID, Status: contract.ActionUnknown, ExecutedAt: now, Timestamp: now, Message: "write outcome is ambiguous; automatic retry and fallback were blocked"}
 					}
@@ -287,6 +341,13 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 		// their results before reporting a required failure so successful peers
 		// can be reused after replanning.
 		for _, result := range batchResults {
+			if result.Action != nil && result.Action.Status == contract.ActionUnknown {
+				cause := result.Err
+				if cause == nil {
+					cause = errors.New("external effect is unknown")
+				}
+				return results, fmt.Errorf("scheduler: step %s: %w", result.StepID, cause)
+			}
 			if result.Err != nil && !isOptional(result.StepID, batch.Steps) {
 				return results, fmt.Errorf("scheduler: step %s: %w", result.StepID, result.Err)
 			}

@@ -2,8 +2,10 @@ package policy
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"github.com/cocoyes/zhizhi-agent-runtime/internal/budget"
 	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
@@ -42,6 +44,12 @@ type DecisionEngine struct{ Default FailurePolicy }
 func (e DecisionEngine) Decide(_ context.Context, observation Observation) Decision {
 	if observation.Err == nil {
 		return Decision{Reason: "success"}
+	}
+	if errors.Is(observation.Err, context.Canceled) || errors.Is(observation.Err, context.DeadlineExceeded) || errors.Is(observation.Err, budget.Exceeded) {
+		return Decision{Action: ActionAbort, Reason: "request stopped"}
+	}
+	if observation.Tool.SideEffect == tool.SideEffectUnknown {
+		return Decision{Action: ActionAbort, Reason: "external effect is unknown"}
 	}
 	classified := Classify(observation.Err)
 	policy := e.Default

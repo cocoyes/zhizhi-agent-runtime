@@ -6,16 +6,19 @@ import (
 	"sync"
 
 	"github.com/cocoyes/zhizhi-agent-runtime/observe"
+	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
 type asyncRunStream struct {
-	events chan Event
-	cancel context.CancelFunc
-	once   sync.Once
-	onDone func()
+	events         chan Event
+	cancel         context.CancelFunc
+	once           sync.Once
+	onDone         func()
+	terminalErr    error
+	errorDelivered bool
 }
 
-func newAsyncRunStream(ctx context.Context, r *runtime, req Request, options []RunOption, observer observe.Observer, onDone func()) EventStream {
+func newAsyncRunStream(ctx context.Context, r *runtime, req Request, cfg runConfig, registry *tool.Registry, onDone func()) EventStream {
 	runCtx, cancel := context.WithCancel(ctx)
 	result := &asyncRunStream{events: make(chan Event, 64), cancel: cancel, onDone: onDone}
 	bridge := observe.Func(func(value observe.Event) {
@@ -32,14 +35,29 @@ func newAsyncRunStream(ctx context.Context, r *runtime, req Request, options []R
 		case <-runCtx.Done():
 		}
 	})
-	runOptions := append(append([]RunOption(nil), options...), WithRunObserver(observe.Multi(observer, bridge)))
 	go func() {
 		defer result.once.Do(result.onDone)
 		defer close(result.events)
-		response, err := r.Run(runCtx, req, runOptions...)
+		runID, err := r.nextRunID()
+		if err == nil {
+			r.runObservers.Store(runID, observe.Multi(cfg.observer, bridge))
+			defer r.runObservers.Delete(runID)
+			r.observeBudget(runCtx, runID)
+			r.emit(observe.Event{Type: "run.started", RunID: runID})
+		}
+		var response *Response
+		if err == nil {
+			response, err = r.runComplex(runCtx, req, runID, registry, cfg)
+		}
 		if err != nil {
+			err = standardizeError("agent.stream", err)
+			result.terminalErr = err
+			code := "RUNTIME_ERROR"
+			if typed, ok := err.(*RuntimeError); ok {
+				code = typed.Code
+			}
 			select {
-			case result.events <- Event{Type: EventRunFailed, Data: map[string]any{"error": err.Error()}}:
+			case result.events <- Event{Type: EventRunFailed, RunID: runID, Data: map[string]any{"error": "operation_failed", "code": code}}:
 			case <-runCtx.Done():
 			}
 			return
@@ -56,6 +74,10 @@ func (s *asyncRunStream) Recv(ctx context.Context) (event Event, returnErr error
 	select {
 	case value, ok := <-s.events:
 		if !ok {
+			if s.terminalErr != nil && !s.errorDelivered {
+				s.errorDelivered = true
+				return Event{}, s.terminalErr
+			}
 			return Event{}, io.EOF
 		}
 		return value, nil

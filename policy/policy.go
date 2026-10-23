@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocoyes/zhizhi-agent-runtime/contract"
+	"github.com/cocoyes/zhizhi-agent-runtime/internal/budget"
 	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
@@ -28,7 +30,10 @@ func Classify(err error) Classification {
 		return Classification{}
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return Classification{Kind: Transient, Retryable: true}
+		return Classification{Kind: Permanent}
+	}
+	if errors.Is(err, budget.Exceeded) {
+		return Classification{Kind: Permanent}
 	}
 	text := strings.ToLower(err.Error())
 	for _, marker := range []string{"timeout", "temporar", "unavailable", "rate limit", "429", "connection reset", "network"} {
@@ -99,13 +104,20 @@ func (r Runner) Execute(ctx context.Context, candidates []tool.Tool, payload []b
 	totalAttempts := 0
 	lastFallback := 0
 	lastKind := ErrorKind("")
+	var lastValue tool.Result
 	records := make([]AttemptRecord, 0)
 	for candidateIndex, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return Result{Attempts: totalAttempts}, err
+		}
 		if candidateIndex > 0 && r.OnEvent != nil {
 			r.OnEvent(Event{Type: "tool.fallback", ToolID: candidate.Spec().ID, Fallback: candidateIndex})
 		}
 		attempts := 0
 		for attempts < maxAttempts {
+			if err := ctx.Err(); err != nil {
+				return Result{Attempts: totalAttempts}, err
+			}
 			attempts++
 			totalAttempts++
 			lastToolID = candidate.Spec().ID
@@ -115,26 +127,50 @@ func (r Runner) Execute(ctx context.Context, candidates []tool.Tool, payload []b
 				if err := r.BeforeCall(candidate); err != nil {
 					lastErr = err
 					records = append(records, AttemptRecord{ToolID: lastToolID, Attempt: attempts, Started: started, Duration: time.Since(started), Error: err.Error()})
-					break
+					return Result{ToolID: lastToolID, Attempts: totalAttempts - 1, Fallbacks: candidateIndex, AttemptsLog: records}, err
 				}
 			}
-			value, err := candidate.Call(ctx, payload)
+			if err := tool.ValidateInput(candidate.Spec(), payload); err != nil {
+				return Result{ToolID: lastToolID, Attempts: totalAttempts - 1, Fallbacks: candidateIndex, AttemptsLog: records}, err
+			}
+			value, err := tool.CallAndCollect(ctx, candidate, payload, nil)
+			if candidate.Spec().SideEffect == tool.SideEffectUnknown && value.Action == nil && !errors.Is(err, budget.Exceeded) {
+				now := time.Now().UTC()
+				value.Action = &tool.ActionReceipt{ToolID: candidate.Spec().ID, Status: contract.ActionUnknown, ExecutedAt: now, Timestamp: now, Message: "external effect is unknown; automatic execution is blocked"}
+				if err == nil {
+					err = errors.New("policy: external effect is unknown")
+				}
+			}
+			if value.Action != nil && value.Action.Status == contract.ActionUnknown && err == nil {
+				err = errors.New("policy: external effect is unknown")
+			}
+			lastValue = value
 			if err == nil {
 				records = append(records, AttemptRecord{ToolID: lastToolID, Attempt: attempts, Started: started, Duration: time.Since(started)})
 				return Result{ToolID: lastToolID, Value: value, Attempts: totalAttempts, Fallbacks: candidateIndex, AttemptsLog: records}, nil
 			}
 			lastErr = err
+			if value.Action != nil && (value.Action.Status == contract.ActionUnknown || value.Action.Status == contract.ActionSuccess || value.Action.Status == contract.ActionConfirmationRequired) {
+				return Result{ToolID: lastToolID, Value: value, Attempts: totalAttempts, Fallbacks: candidateIndex, AttemptsLog: records, ErrorKind: Ambiguous}, err
+			}
+			if errors.Is(err, budget.Exceeded) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				kind := Permanent
+				if (candidate.Spec().IsWrite() || candidate.Spec().SideEffect == tool.SideEffectUnknown) && !errors.Is(err, budget.Exceeded) {
+					kind = Ambiguous
+				}
+				return Result{ToolID: lastToolID, Value: value, Attempts: totalAttempts, Fallbacks: candidateIndex, AttemptsLog: records, ErrorKind: kind}, err
+			}
 			records = append(records, AttemptRecord{ToolID: lastToolID, Attempt: attempts, Started: started, Duration: time.Since(started), Error: err.Error()})
 			decision := Classify(err)
 			lastKind = decision.Kind
 			// A transport-style failure after invoking a write cannot establish
 			// whether the external effect happened. Treat it as ambiguous even if
 			// the same error would be merely transient for a read.
-			if candidate.Spec().IsWrite() && decision.Kind == Transient {
+			if candidate.Spec().SideEffect == tool.SideEffectUnknown || (candidate.Spec().IsWrite() && decision.Kind == Transient) {
 				lastKind = Ambiguous
 			}
 			if lastKind == Ambiguous {
-				return Result{ToolID: lastToolID, Attempts: totalAttempts, Fallbacks: candidateIndex, AttemptsLog: records, ErrorKind: lastKind}, lastErr
+				return Result{ToolID: lastToolID, Value: value, Attempts: totalAttempts, Fallbacks: candidateIndex, AttemptsLog: records, ErrorKind: lastKind}, lastErr
 			}
 			if !retryClassAllowed(decision.Kind, r.Config.RetryOn) {
 				break
@@ -165,7 +201,7 @@ func (r Runner) Execute(ctx context.Context, candidates []tool.Tool, payload []b
 			}
 		}
 	}
-	return Result{ToolID: lastToolID, Attempts: totalAttempts, Fallbacks: lastFallback, AttemptsLog: records, ErrorKind: lastKind}, lastErr
+	return Result{ToolID: lastToolID, Value: lastValue, Attempts: totalAttempts, Fallbacks: lastFallback, AttemptsLog: records, ErrorKind: lastKind}, lastErr
 }
 
 func retryClassAllowed(kind ErrorKind, allowed []ErrorKind) bool {

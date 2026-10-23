@@ -39,7 +39,7 @@ func (s *schemaLessAwareScripted) Generate(_ context.Context, input model.ModelI
 	if (s.calls == 1 && s.firstValid && knowsFallback) || (s.calls > 1 && knowsFallback) {
 		return &model.ModelOutput{Text: `{"version":1,"goal":"Get today's local weather","steps":[{"id":"locate-and-weather","mode":"agentic","goal":"Locate the user and get weather for the observed city","success_criteria":"Current weather is available","capabilities":["locate","weather"],"tool_budget":{"min":2,"max":2,"required_successes":2}}]}`}, nil
 	}
-	return &model.ModelOutput{Text: `{"version":1,"steps":[{"id":"locate","capability":"locate","input":{"ip":"127.0.0.1"}},{"id":"weather","capability":"weather","depends_on":["locate"],"bindings":[{"source_step":"locate","source_path":"/city","target_path":"/city"}]}]}`}, nil
+	return &model.ModelOutput{Text: `{"version":1,"steps":[{"id":"locate","mode":"tool","capability":"locate","input":{"ip":"127.0.0.1"}},{"id":"weather","mode":"tool","capability":"weather","depends_on":["locate"],"bindings":[{"source_step":"locate","source_path":"/city","target_path":"/city"}]}]}`}, nil
 }
 func (s *schemaLessAwareScripted) Stream(context.Context, model.ModelInput) (model.Stream, error) {
 	return nil, nil
@@ -82,7 +82,7 @@ func (s *toolCallingScripted) Generate(_ context.Context, input model.ModelInput
 	var call model.ToolCallRequest
 	call.Type = "function"
 	call.Function.Name = planOutputToolName
-	call.Function.Arguments = `{"version":1,"steps":[{"id":"weather","capability":"weather.current"}]}`
+	call.Function.Arguments = `{"version":1,"steps":[{"id":"weather","mode":"tool","capability":"weather.current"}]}`
 	return &model.ModelOutput{ToolCalls: []model.ToolCallRequest{call}}, nil
 }
 func (s *toolCallingScripted) Stream(context.Context, model.ModelInput) (model.Stream, error) {
@@ -113,9 +113,9 @@ func (s *wrappedPlanScripted) Capabilities() model.ModelCapabilities {
 func (s *wrappedPlanScripted) Generate(context.Context, model.ModelInput) (*model.ModelOutput, error) {
 	s.calls++
 	if s.calls == 1 {
-		return &model.ModelOutput{Text: `{"plan":{"version":1,"steps":[{"id":"weather","capability":"weather.current"}]}}`}, nil
+		return &model.ModelOutput{Text: `{"plan":{"version":1,"steps":[{"id":"weather","mode":"tool","capability":"weather.current"}]}}`}, nil
 	}
-	return &model.ModelOutput{Text: `{"version":1,"steps":[{"id":"weather","capability":"weather.current"}]}`}, nil
+	return &model.ModelOutput{Text: `{"version":1,"steps":[{"id":"weather","mode":"tool","capability":"weather.current"}]}`}, nil
 }
 func (s *wrappedPlanScripted) Stream(context.Context, model.ModelInput) (model.Stream, error) {
 	return nil, nil
@@ -135,7 +135,7 @@ func TestDecodePlanRejectsEmptyInitialPlan(t *testing.T) {
 	}
 }
 func (scripted) Generate(context.Context, model.ModelInput) (*model.ModelOutput, error) {
-	return &model.ModelOutput{Text: `{"version":1,"steps":[{"id":"weather","capability":"weather.current","input":{"city":"Shenzhen"}}]}`}, nil
+	return &model.ModelOutput{Text: `{"version":1,"steps":[{"id":"weather","mode":"tool","capability":"weather.current","input":{"city":"Shenzhen"}}]}`}, nil
 }
 func (scripted) Stream(context.Context, model.ModelInput) (model.Stream, error) { return nil, nil }
 func TestModelPlannerParsesAndNormalizes(t *testing.T) {
@@ -156,7 +156,7 @@ func (s *repairScripted) Generate(context.Context, model.ModelInput) (*model.Mod
 	if s.calls == 1 {
 		return &model.ModelOutput{Text: `{"version":1,"steps":[{"id":"weather"}]}`}, nil
 	}
-	return &model.ModelOutput{Text: "```json\n{version: 1, steps: [{id: 'weather', capability: 'weather.current'}]}\n```"}, nil
+	return &model.ModelOutput{Text: "```json\n{version: 1, steps: [{id: 'weather', mode: 'tool', capability: 'weather.current'}]}\n```"}, nil
 }
 func (s *repairScripted) Stream(context.Context, model.ModelInput) (model.Stream, error) {
 	return nil, nil
@@ -179,9 +179,9 @@ func (s *bindingRepairScripted) Capabilities() model.ModelCapabilities {
 func (s *bindingRepairScripted) Generate(context.Context, model.ModelInput) (*model.ModelOutput, error) {
 	s.calls++
 	if s.calls == 1 {
-		return &model.ModelOutput{Text: `{"version":1,"steps":[{"id":"weather","capability":"weather"},{"id":"activity","capability":"activity","depends_on":["weather"],"input":{"temperature":"{{weather.temperature}}"}}]}`}, nil
+		return &model.ModelOutput{Text: `{"version":1,"steps":[{"id":"weather","mode":"tool","capability":"weather"},{"id":"activity","mode":"tool","capability":"activity","depends_on":["weather"],"input":{"temperature":"{{weather.temperature}}"}}]}`}, nil
 	}
-	return &model.ModelOutput{Text: `{"version":1,"steps":[{"id":"weather","capability":"weather"},{"id":"activity","capability":"activity","depends_on":["weather"],"bindings":[{"source_step":"weather","source_path":"temperature","target_path":"temperature"}]}]}`}, nil
+	return &model.ModelOutput{Text: `{"version":1,"steps":[{"id":"weather","mode":"tool","capability":"weather"},{"id":"activity","mode":"tool","capability":"activity","depends_on":["weather"],"bindings":[{"source_step":"weather","source_path":"temperature","target_path":"temperature"}]}]}`}, nil
 }
 func (s *bindingRepairScripted) Stream(context.Context, model.ModelInput) (model.Stream, error) {
 	return nil, nil

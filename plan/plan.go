@@ -5,6 +5,7 @@ package plan
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 type Step struct {
@@ -83,33 +84,27 @@ type Plan struct {
 
 func (p Plan) Validate() error {
 	seen := make(map[string]struct{}, len(p.Steps))
-	for _, step := range p.Steps {
-		if step.ID == "" {
+	for index, step := range p.Steps {
+		if strings.TrimSpace(step.ID) == "" {
 			return fmt.Errorf("plan: step id is required")
 		}
-		mode := step.Mode
-		if mode == "" {
-			mode = StepModeTool
-		}
-		if mode != StepModeTool && mode != StepModeAgentic {
-			return fmt.Errorf("plan: step %q has invalid mode %q", step.ID, step.Mode)
-		}
-		if mode == StepModeTool && step.Capability == "" {
-			return fmt.Errorf("plan: step %q capability is required", step.ID)
-		}
-		if mode == StepModeAgentic {
-			if step.Goal == "" {
-				return fmt.Errorf("plan: agentic step %q goal is required", step.ID)
+		if err := validateStepMode(step); err != nil {
+			field := "mode"
+			if effectiveMode(step.Mode) == StepModeAgentic {
+				switch {
+				case strings.TrimSpace(step.Goal) == "":
+					field = "goal"
+				case strings.TrimSpace(step.SuccessCriteria) == "":
+					field = "success_criteria"
+				case len(step.Capabilities) == 0:
+					field = "capabilities"
+				default:
+					field = "tool_budget"
+				}
+			} else if strings.TrimSpace(step.Capability) == "" {
+				field = "capability"
 			}
-			if len(step.Capabilities) == 0 {
-				return fmt.Errorf("plan: agentic step %q requires an allowlist", step.ID)
-			}
-			if step.ToolBudget.Min < 0 || step.ToolBudget.Max < 0 || step.ToolBudget.RequiredSuccesses < 0 {
-				return fmt.Errorf("plan: agentic step %q has negative tool budget", step.ID)
-			}
-			if step.ToolBudget.Max > 0 && step.ToolBudget.Min > step.ToolBudget.Max {
-				return fmt.Errorf("plan: agentic step %q min tool calls exceeds max", step.ID)
-			}
+			return invalidAt("semantic", fmt.Sprintf("/steps/%d/%s", index, field), err)
 		}
 		if _, ok := seen[step.ID]; ok {
 			return fmt.Errorf("plan: duplicate step %q", step.ID)
@@ -125,6 +120,11 @@ func (p Plan) Validate() error {
 			graph[step.ID] = append(graph[step.ID], dependency)
 		}
 		for _, binding := range step.Bindings {
+			for _, source := range p.Steps {
+				if source.ID == binding.SourceStep && effectiveMode(source.Mode) == StepModeAgentic {
+					return fmt.Errorf("plan: binding cannot reference agentic output")
+				}
+			}
 			if binding.SourceStep == "" || binding.SourcePath == "" || binding.TargetPath == "" {
 				return fmt.Errorf("plan: step %q binding requires source_step, source_path, and target_path", step.ID)
 			}
@@ -143,6 +143,11 @@ func (p Plan) Validate() error {
 			}
 		}
 		if step.Condition != nil {
+			for _, source := range p.Steps {
+				if source.ID == step.Condition.SourceStep && effectiveMode(source.Mode) == StepModeAgentic {
+					return fmt.Errorf("plan: condition cannot reference agentic output")
+				}
+			}
 			if step.Condition.SourceStep == "" {
 				return fmt.Errorf("plan: step %q condition source_step is required", step.ID)
 			}
@@ -202,8 +207,65 @@ func (p Plan) Normalize() (Plan, error) {
 	out.Steps = append([]Step(nil), p.Steps...)
 	sort.SliceStable(out.Steps, func(i, j int) bool { return out.Steps[i].ID < out.Steps[j].ID })
 	for i := range out.Steps {
+		out.Steps[i] = normalizeStep(out.Steps[i])
 		out.Steps[i].DependsOn = append([]string(nil), out.Steps[i].DependsOn...)
 		sort.Strings(out.Steps[i].DependsOn)
 	}
 	return out, nil
+}
+
+func effectiveMode(mode StepMode) StepMode {
+	mode = StepMode(strings.TrimSpace(string(mode)))
+	if mode == "" {
+		return StepModeTool
+	}
+	return mode
+}
+
+func validateStepMode(step Step) error {
+	switch effectiveMode(step.Mode) {
+	case StepModeTool:
+		if strings.TrimSpace(step.Capability) == "" {
+			return fmt.Errorf("plan: tool capability is required")
+		}
+		if len(step.Capabilities) > 0 || step.ToolBudget != (ToolCallBudget{}) {
+			return fmt.Errorf("plan: tool step contains agentic fields")
+		}
+	case StepModeAgentic:
+		if strings.TrimSpace(step.Goal) == "" || strings.TrimSpace(step.SuccessCriteria) == "" || len(step.Capabilities) == 0 {
+			return fmt.Errorf("plan: agentic goal, success criteria, and capabilities are required")
+		}
+		for _, capability := range step.Capabilities {
+			if strings.TrimSpace(capability) == "" {
+				return fmt.Errorf("plan: agentic capability must be non-empty")
+			}
+		}
+		if strings.TrimSpace(step.Capability) != "" || len(step.Bindings) > 0 {
+			return fmt.Errorf("plan: agentic step contains deterministic tool fields")
+		}
+		b := step.ToolBudget
+		if b.Min < 0 || b.Max <= 0 || b.RequiredSuccesses < 0 || b.Min > b.Max || b.RequiredSuccesses > b.Max {
+			return fmt.Errorf("plan: invalid finite agentic tool budget")
+		}
+	default:
+		return fmt.Errorf("plan: invalid step mode")
+	}
+	return nil
+}
+
+func normalizeStep(step Step) Step {
+	step.Mode = effectiveMode(step.Mode)
+	if step.Mode == StepModeAgentic {
+		seen := map[string]bool{}
+		capabilities := make([]string, 0, len(step.Capabilities))
+		for _, capability := range step.Capabilities {
+			capability = strings.TrimSpace(capability)
+			if !seen[capability] {
+				capabilities = append(capabilities, capability)
+				seen[capability] = true
+			}
+		}
+		step.Capabilities = capabilities
+	}
+	return step
 }

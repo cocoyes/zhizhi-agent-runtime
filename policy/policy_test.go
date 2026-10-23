@@ -3,9 +3,28 @@ package policy
 import (
 	"context"
 	"errors"
+	"fmt"
+	"github.com/cocoyes/zhizhi-agent-runtime/internal/budget"
 	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 	"testing"
 )
+
+func TestRequestStopNeverRetriesOrFallsBack(t *testing.T) {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded, budget.Exceeded} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			calls := 0
+			first := tool.Func("first", "first", func(context.Context, struct{}) (string, error) {
+				calls++
+				return "", fmt.Errorf("temporary timeout: %w", cause)
+			})
+			backup := tool.Func("backup", "backup", func(context.Context, struct{}) (string, error) { calls++; return "ok", nil })
+			_, err := (Runner{Config: Config{MaxAttempts: 3}}).Execute(context.Background(), []tool.Tool{first, backup}, []byte(`{}`))
+			if !errors.Is(err, cause) || calls != 1 {
+				t.Fatalf("stop lost: %v calls=%d", err, calls)
+			}
+		})
+	}
+}
 
 func TestRetryReadOnlyTransientFailure(t *testing.T) {
 	attempts := 0
@@ -27,6 +46,23 @@ func TestDoesNotRetryWrite(t *testing.T) {
 	_, err := (Runner{}).Execute(context.Background(), []tool.Tool{v}, []byte(`{}`))
 	if err == nil || attempts != 1 {
 		t.Fatalf("write was retried: err=%v attempts=%d", err, attempts)
+	}
+}
+
+func TestUnknownEffectCannotRetryOrFallback(t *testing.T) {
+	calls, backupCalls := 0, 0
+	unknown := tool.Func("unknown", "unknown effect", func(context.Context, struct{}) (string, error) {
+		calls++
+		return "", errors.New("temporary unavailable")
+	}, tool.WithSideEffect(tool.SideEffectUnknown), tool.WithIdempotency(tool.IdempotencySafe), tool.WithRetryable(true))
+	backup := tool.Func("backup", "backup", func(context.Context, struct{}) (string, error) { backupCalls++; return "ok", nil })
+	out, err := (Runner{Config: Config{MaxAttempts: 3}}).Execute(context.Background(), []tool.Tool{unknown, backup}, []byte(`{}`))
+	if err == nil || calls != 1 || backupCalls != 0 || out.ErrorKind != Ambiguous {
+		t.Fatalf("unknown effect replayed: %+v err=%v calls=%d backup=%d", out, err, calls, backupCalls)
+	}
+	decision := (DecisionEngine{Default: FailurePolicy{OnExhausted: ActionReplan}}).Decide(context.Background(), Observation{Err: err, Tool: unknown.Spec()})
+	if decision.Action != ActionAbort {
+		t.Fatalf("unknown effect may replan: %+v", decision)
 	}
 }
 func TestFallbackCandidate(t *testing.T) {
