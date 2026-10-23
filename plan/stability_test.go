@@ -85,6 +85,38 @@ func TestStructuredFailureRepairsAndPreservesModelCause(t *testing.T) {
 	}
 }
 
+// The single repair attempt must carry guidance for the specific rule that was
+// broken; a generic "try again" wastes it.
+func TestRepairTurnCarriesClassSpecificGuidance(t *testing.T) {
+	cases := []struct {
+		name     string
+		kind     string
+		err      error
+		contains string
+	}{
+		{"schemaless", "semantic", errors.New(`plan: step "b" binding source path "/x" is unavailable because source tool "search" declares no output schema`), "mode \"agentic\""},
+		{"budget", "semantic", errors.New("plan: invalid finite agentic tool budget"), "required_successes"},
+		{"schema", "schema", errors.New("required step field missing"), "tool_budget{min,max,required_successes}"},
+		{"decode", "decode", errors.New("repair JSON: unexpected"), "no Markdown fences"},
+		{"capability", "capability_reference", errors.New("plan: capability has no tool"), "copied verbatim from the tool catalog"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			class := repairClass(tc.kind, tc.err)
+			guidance := repairGuidance(class, "/steps/0/goal")
+			if !strings.Contains(guidance, tc.contains) {
+				t.Fatalf("guidance for %s did not explain the rule: %s", class, guidance)
+			}
+			if !strings.Contains(guidance, "/steps/0/goal") {
+				t.Fatalf("guidance dropped the failing path: %s", guidance)
+			}
+		})
+	}
+	if class := repairClass("semantic", errors.New("plan: dependency cycle at \"a\"")); class != "cycle" {
+		t.Fatalf("cycle misclassified as %q", class)
+	}
+}
+
 func TestSharedAgenticOutputContract(t *testing.T) {
 	step := `{"id":"a","mode":"agentic","goal":"observe","success_criteria":"done","capabilities":["x"],"input":{"context":"hint"},"tool_budget":{"min":0,"max":2,"required_successes":0}}`
 	value, err := decodePlan(`{"version":1,"steps":[`+step+`]}`, nil)

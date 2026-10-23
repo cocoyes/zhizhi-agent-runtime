@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/cocoyes/zhizhi-agent-runtime/checkpoint"
+	"github.com/cocoyes/zhizhi-agent-runtime/contract"
 	"github.com/cocoyes/zhizhi-agent-runtime/model"
 	"github.com/cocoyes/zhizhi-agent-runtime/observe"
 	"github.com/cocoyes/zhizhi-agent-runtime/plan"
@@ -161,7 +162,9 @@ func TestComplexRunReplansOnceAfterRequiredFailure(t *testing.T) {
 func TestComplexCancelledStepDoesNotReplan(t *testing.T) {
 	failing := tool.Func("weather", "weather", func(context.Context, struct {
 		City string `json:"city"`
-	}) (string, error) { return "", context.Canceled }, tool.WithCapabilities("weather.current"))
+	}) (string, error) {
+		return "", context.Canceled
+	}, tool.WithCapabilities("weather.current"))
 	rp := &recoveryPlanner{}
 	a, err := New(WithModel(&complexModel{}), WithTools(failing), WithPlanner(fixedPlanner{}), WithReplanner(rp))
 	if err != nil {
@@ -188,26 +191,98 @@ func TestComplexFailureEmitsRunFailedOnce(t *testing.T) {
 	}, tool.WithCapabilities("weather.current"))
 	mode := RunModeAgentComplex
 	failedEvents := 0
+	replanFailedEvents := 0
 	a, err := New(
 		WithModel(&complexModel{}),
 		WithTools(failing),
 		WithPlanner(fixedPlanner{}),
 		WithReplanner(noopReplanner{}),
 		WithObserver(observe.Func(func(event observe.Event) {
-			if event.Type == "run.failed" {
+			switch event.Type {
+			case "run.failed":
 				failedEvents++
+			case "replan.failed":
+				replanFailedEvents++
 			}
 		})),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.Run(context.Background(), Request{Input: "fail", Mode: &mode}); err == nil {
-		t.Fatal("expected complex run failure")
+	// A replan that cannot produce a usable patch degrades the run instead of
+	// failing it: the facts already gathered are still composed into an answer.
+	out, err := a.Run(context.Background(), Request{Input: "fail", Mode: &mode})
+	if err != nil {
+		t.Fatalf("replan failure should degrade, not fail: %v", err)
 	}
-	if failedEvents != 1 {
-		t.Fatalf("expected one run.failed event, got %d", failedEvents)
+	if out == nil || out.Outcome != contract.OutcomeDegraded {
+		t.Fatalf("expected degraded outcome, got %+v", out)
 	}
+	if !hasWarning(out.Warnings, "REPLAN_FAILED") {
+		t.Fatalf("expected REPLAN_FAILED warning, got %+v", out.Warnings)
+	}
+	if replanFailedEvents != 1 {
+		t.Fatalf("expected one replan.failed event, got %d", replanFailedEvents)
+	}
+	if failedEvents != 0 {
+		t.Fatalf("expected no run.failed event, got %d", failedEvents)
+	}
+}
+
+type erroringReplanner struct{ calls int }
+
+func (r *erroringReplanner) Replan(context.Context, plan.Input) (plan.Patch, error) {
+	r.calls++
+	return plan.Patch{}, errors.New("replan model output was unusable")
+}
+
+// A replan failure after work has already succeeded must keep that work and
+// still answer. The run degrades; it does not discard facts or re-run steps.
+func TestComplexReplanFailureKeepsPartialResults(t *testing.T) {
+	reads, failures := 0, 0
+	read := tool.Func("read", "read", func(context.Context, struct{}) (string, error) {
+		reads++
+		return "attraction: 万绿湖", nil
+	}, tool.WithCapabilities("state.read"))
+	fail := tool.Func("fail", "fail", func(context.Context, struct{}) (string, error) {
+		failures++
+		return "", errors.New("permanent failure")
+	}, tool.WithCapabilities("state.fail"))
+	planner := plannerFunc(func(context.Context, string, []model.ToolSpec) (plan.Plan, error) {
+		return plan.Plan{Version: 1, Steps: []plan.Step{{ID: "read", Capability: "state.read"}, {ID: "fail", Capability: "state.fail", DependsOn: []string{"read"}}}}, nil
+	})
+	m := &complexModel{}
+	rp := &erroringReplanner{}
+	mode := RunModeAgentComplex
+	a, err := New(WithModel(m), WithTools(read, fail), WithPlanner(planner), WithReplanner(rp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := a.Run(context.Background(), Request{Input: "河源", Mode: &mode})
+	if err != nil {
+		t.Fatalf("replan failure should degrade, not fail: %v", err)
+	}
+	if out.Outcome != contract.OutcomeDegraded || !hasWarning(out.Warnings, "REPLAN_FAILED") {
+		t.Fatalf("expected degraded outcome with REPLAN_FAILED, got %+v", out)
+	}
+	if out.Text == "" {
+		t.Fatalf("degraded run produced no answer: %+v", out)
+	}
+	if rp.calls != 1 || reads != 1 || failures != 1 {
+		t.Fatalf("replan or execution repeated: replans=%d reads=%d failures=%d", rp.calls, reads, failures)
+	}
+	if out.Stats.SuccessfulTools != 1 || out.Stats.FailedTools != 1 {
+		t.Fatalf("partial results were lost: %+v", out.Stats)
+	}
+}
+
+func hasWarning(warnings []contract.Warning, code string) bool {
+	for _, warning := range warnings {
+		if warning.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 type removeFailedReplanner struct{}

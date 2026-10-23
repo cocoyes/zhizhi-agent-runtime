@@ -1122,7 +1122,20 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 		p = modelPlanner
 	}
 	r.emit(observe.Event{Type: "planner.started", RunID: runID, Details: map[string]any{"request": req.Input, "tools": model.PlanningToolCatalog(registry.ModelSpecs())}})
+
+	// 创建规则修复器
+	ruleFixer := plan.NewRuleFixer()
+	ruleFixer.Trace = r.plannerTrace("rule_fixer", runID, 0)
+
+	// Replan patches go through the same deterministic repairs as the initial plan.
+	replanFixer := plan.NewRuleFixer()
+	replanFixer.Trace = r.plannerTrace("replan_rule_fixer", runID, 0)
+
 	var planHandler middleware.PlannerHandler = func(ctx context.Context, input middleware.PlannerInput) (plan.Plan, error) {
+		// 如果是 ModelPlanner,使用带 fixer 的方法
+		if mp, ok := p.(*plan.ModelPlanner); ok {
+			return mp.PlanWithFixer(ctx, input.Request, input.Tools, ruleFixer)
+		}
 		return p.Plan(ctx, input.Request, input.Tools)
 	}
 	plannerMiddleware := append(append([]middleware.PlannerMiddleware(nil), r.cfg.plannerMiddleware...), runCfg.plannerMiddleware...)
@@ -1179,6 +1192,9 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 		maxReplans = 1
 	}
 	actions := make([]tool.ActionReceipt, 0)
+	// Non-nil when replanning failed and the run fell back to composing from
+	// the facts it already has. Checked after the loop to degrade the outcome.
+	var replanFailure error
 	started := time.Now()
 	for {
 		if r.cfg.budget.MaxSteps > 0 && len(semantic.Steps) > r.cfg.budget.MaxSteps {
@@ -1264,10 +1280,13 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 			break
 		}
 		if recovered {
-			return nil, err
+			replanFailure = fmt.Errorf("replan: not attempted because the initial plan was recovered: %w", err)
+			break
 		}
 		if replans >= maxReplans {
-			return nil, fmt.Errorf("budget: max replans exceeded after execution failure: %w", err)
+			replanFailure = fmt.Errorf("budget: max replans exceeded after execution failure: %w", err)
+			r.emit(observe.Event{Type: "replan.failed", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"error": err.Error(), "reason": "max_replans", "replans": replans, "max_replans": maxReplans}})
+			break
 		}
 		rp := r.cfg.replanner
 		if rp == nil {
@@ -1286,23 +1305,51 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 		}
 		patch, patchErr := replanHandler(ctx, replanInput)
 		if patchErr != nil {
-			return nil, &safeOperationError{message: "replan: execution and replanning failed", cause: errors.Join(err, patchErr)}
+			// A failed replan must not discard the facts already produced. Exit the
+			// loop and compose from execution history; the outcome is degraded and
+			// the replan failure is surfaced as a warning rather than an outage.
+			if errors.Is(patchErr, budget.Exceeded) || errors.Is(patchErr, context.Canceled) || errors.Is(patchErr, context.DeadlineExceeded) {
+				return nil, &safeOperationError{message: "replan: execution and replanning failed", cause: errors.Join(err, patchErr)}
+			}
+			replanFailure = errors.Join(err, patchErr)
+			r.emit(observe.Event{Type: "replan.failed", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"error": patchErr.Error(), "execution_error": err.Error()}})
+			break
 		}
 		if compatibilityErr := plan.ValidatePatchCompatibility(semantic, patch, registry.ModelSpecs()); compatibilityErr != nil {
-			return nil, compatibilityErr
+			replanFailure = errors.Join(err, fmt.Errorf("replan: incompatible patch: %w", compatibilityErr))
+			r.emit(observe.Event{Type: "replan.failed", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"error": compatibilityErr.Error(), "execution_error": err.Error(), "reason": "incompatible_patch"}})
+			break
 		}
 		patched, applyErr := patch.Apply(semantic)
-		err = applyErr
-		if err != nil {
-			return nil, err
+		if applyErr != nil {
+			replanFailure = errors.Join(err, fmt.Errorf("replan: patch apply failed: %w", applyErr))
+			r.emit(observe.Event{Type: "replan.failed", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"error": applyErr.Error(), "execution_error": err.Error(), "reason": "patch_apply"}})
+			break
 		}
-		if err := protectCompletedWrites(semantic, patched, completed, registry); err != nil {
-			return nil, err
+		if protectErr := protectCompletedWrites(semantic, patched, completed, registry); protectErr != nil {
+			replanFailure = errors.Join(err, fmt.Errorf("replan: unsafe patch: %w", protectErr))
+			r.emit(observe.Event{Type: "replan.failed", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"error": protectErr.Error(), "execution_error": err.Error(), "reason": "write_protection"}})
+			break
+		}
+		if validateErr := plan.ValidateAgainstTools(patched, registry.ModelSpecs()); validateErr != nil {
+			// The patch may be structurally fine but contain the same
+			// deterministic defects the planner produced, so give the rule fixer
+			// a chance before declaring the replan lost.
+			fixed, applied, fixErr := replanFixer.TryFix(patched, validateErr, registry.ModelSpecs())
+			if fixErr != nil || !applied {
+				replanFailure = errors.Join(err, fmt.Errorf("replan: invalid patched plan: %w", validateErr))
+				r.emit(observe.Event{Type: "replan.failed", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"error": validateErr.Error(), "execution_error": err.Error(), "reason": "invalid_patched_plan"}})
+				break
+			}
+			if protectErr := protectCompletedWrites(semantic, fixed, completed, registry); protectErr != nil {
+				replanFailure = errors.Join(err, fmt.Errorf("replan: unsafe repaired patch: %w", protectErr))
+				r.emit(observe.Event{Type: "replan.failed", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"error": protectErr.Error(), "execution_error": err.Error(), "reason": "write_protection"}})
+				break
+			}
+			patched = fixed
+			r.emit(observe.Event{Type: "replan.repaired", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"error": validateErr.Error(), "steps": len(patched.Steps)}})
 		}
 		semantic = patched
-		if err := plan.ValidateAgainstTools(semantic, registry.ModelSpecs()); err != nil {
-			return nil, fmt.Errorf("replan: invalid patched plan: %w", err)
-		}
 		replans++
 		r.emit(observe.Event{Type: "replan.completed", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"version": semantic.Version, "replans": replans}, Details: map[string]any{"patch": patch, "plan": semantic}})
 	}
@@ -1312,6 +1359,10 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 	if recovered {
 		outcome = contract.OutcomeDegraded
 		warnings = append(warnings, contract.Warning{Code: "INITIAL_PLAN_RECOVERED", Message: "The initial plan was invalid; the response reflects bounded recovery facts and may require clarification."})
+	}
+	if replanFailure != nil {
+		outcome = contract.OutcomeDegraded
+		warnings = append(warnings, contract.Warning{Code: "REPLAN_FAILED", Message: replanFailure.Error(), Metadata: map[string]any{"replans": replans}})
 	}
 	currentSuccess := make(map[string]bool, len(results))
 	for _, result := range results {

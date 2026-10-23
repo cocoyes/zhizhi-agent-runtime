@@ -168,6 +168,63 @@ func outputTool[T any](name, description string) (model.ToolSpec, error) {
 	return t, err
 }
 
+// repairClass narrows a rejected candidate to a fixable category. The repair
+// turn is the only chance the model gets, so it must say which rule was broken
+// rather than repeating a generic "try again".
+func repairClass(kind string, err error) string {
+	switch kind {
+	case "candidate_missing":
+		return "missing_output"
+	case "decode":
+		return "decode"
+	case "schema":
+		return "schema"
+	case "capability_reference":
+		return "capability"
+	}
+	switch ClassifyError(err) {
+	case "schema_missing", "schema_null":
+		return "schemaless_binding"
+	case "budget_range", "budget_invalid":
+		return "budget"
+	case "circular_dependency":
+		return "cycle"
+	case "mode_conflict":
+		return "mode"
+	case "binding_invalid":
+		return "binding"
+	}
+	return "semantic"
+}
+
+func repairGuidance(class, path string) string {
+	prefix := "The previous output was rejected. Emit the complete result again, corrected."
+	if path != "" && path != "/" {
+		prefix += " The rejection is at JSON pointer " + path + "."
+	}
+	switch class {
+	case "missing_output":
+		return prefix + " You must call the required output tool with the schema arguments; prose or an unrelated tool call is not accepted."
+	case "decode":
+		return prefix + " The payload was not valid JSON for the schema. Use double-quoted keys and strings, no comments, no trailing commas, no Markdown fences."
+	case "schema":
+		return prefix + " The payload is valid JSON but does not match the required schema. Every step needs id and mode; a tool step needs capability; an agentic step needs goal, success_criteria, capabilities and tool_budget{min,max,required_successes}. Do not add fields the schema does not define, and do not omit required ones."
+	case "capability":
+		return prefix + " Every capability and agentic capabilities entry must be copied verbatim from the tool catalog. Do not invent, translate, or abbreviate tool names."
+	case "schemaless_binding":
+		return prefix + " A binding source tool declares no output schema, so its runtime result cannot be referenced. Delete that binding and merge the steps that depend on that tool into a single mode \"agentic\" step whose capabilities list only the tools needed, with an explicit goal, success_criteria, and a finite tool_budget. Agentic steps must not carry bindings."
+	case "budget":
+		return prefix + " The agentic tool_budget is impossible. Set 0 <= min <= max, 0 <= required_successes <= max, and max >= 1."
+	case "cycle":
+		return prefix + " The depends_on graph contains a cycle. Remove the back edge so execution has a topological order."
+	case "mode":
+		return prefix + " A tool step and an agentic step were mixed: tool steps need capability, depends_on, input, bindings, condition; agentic steps need goal, success_criteria, capabilities, tool_budget and must not carry bindings or a capability field."
+	case "binding":
+		return prefix + " Bindings must reference an existing dependency as source_step, a source_path that the source tool output_schema actually defines, and a target_path that exists in the current tool input_schema. Every required input must be supplied by input or bindings."
+	}
+	return prefix + " Fix the specific validation error shown and keep every step that was not reported as invalid unchanged."
+}
+
 // generateCandidate centralizes repair accounting and safe lifecycle traces.
 func generateCandidate[T any](ctx context.Context, m model.Model, phase string, limit *int, useTool bool, messages []model.Message, t model.ToolSpec, trace func(string, map[string]any), decode func(string) (T, error)) (T, error) {
 	var zero T
@@ -176,6 +233,10 @@ func generateCandidate[T any](ctx context.Context, m model.Model, phase string, 
 		messages[0].Content += "\nReturn JSON matching this exact schema (including explicit step mode):\n" + string(t.Function.Parameters)
 	}
 	var last error
+	// lastValue is the most recent candidate that parsed far enough to be
+	// useful. Returning it with the error lets a rule fixer repair a plan the
+	// validator rejected instead of a zero value.
+	var lastValue T
 	var candidate string
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
@@ -186,7 +247,7 @@ func generateCandidate[T any](ctx context.Context, m model.Model, phase string, 
 			if repairs < 0 {
 				repairs = 0
 			}
-			return zero, &StructuredOutputError{Phase: phase, Kind: "semantic", Path: "/", Attempts: attempt, RepairAttempts: repairs, Recoverable: false, Cause: errors.Join(err, last)}
+			return lastValue, &StructuredOutputError{Phase: phase, Kind: "semantic", Path: "/", Attempts: attempt, RepairAttempts: repairs, Recoverable: false, Cause: errors.Join(err, last)}
 		}
 		request := structuredModelInput(messages, t, useTool)
 		request.JSONMode = !useTool && m.Capabilities().JSONMode
@@ -212,7 +273,7 @@ func generateCandidate[T any](ctx context.Context, m model.Model, phase string, 
 						repairs = 0
 					}
 				}
-				return zero, &StructuredOutputError{Phase: phase, Kind: "semantic", Path: "/", Attempts: attempts, RepairAttempts: repairs, Recoverable: false, Cause: errors.Join(err, last)}
+				return lastValue, &StructuredOutputError{Phase: phase, Kind: "semantic", Path: "/", Attempts: attempts, RepairAttempts: repairs, Recoverable: false, Cause: errors.Join(err, last)}
 			}
 			return zero, err
 		}
@@ -235,6 +296,7 @@ func generateCandidate[T any](ctx context.Context, m model.Model, phase string, 
 					path = issue.path
 				}
 			}
+			lastValue = result
 		}
 		if attempt > 0 {
 			trace("repair.completed", map[string]any{"attempt": attempt, "repair_attempt": attempt, "kind": kind, "path": "/", "model_id": m.ID(), "latency_ms": time.Since(started).Milliseconds(), "validation_succeeded": err == nil})
@@ -245,10 +307,12 @@ func generateCandidate[T any](ctx context.Context, m model.Model, phase string, 
 		last = err
 		trace("candidate.invalid", map[string]any{"attempt": attempt + 1, "kind": kind, "path": path, "model_id": m.ID(), "latency_ms": time.Since(started).Milliseconds()})
 		if attempt >= repairLimit(limit) {
-			return zero, &StructuredOutputError{Phase: phase, Kind: kind, Path: path, Attempts: attempt + 1, RepairAttempts: attempt, Recoverable: true, Cause: err}
+			return lastValue, &StructuredOutputError{Phase: phase, Kind: kind, Path: path, Attempts: attempt + 1, RepairAttempts: attempt, Recoverable: true, Cause: err}
 		}
+		class := repairClass(kind, err)
+		trace("repair.guidance", map[string]any{"attempt": attempt, "kind": kind, "class": class, "path": path})
 		repairRequest := messages[len(messages)-1].Content + "\nInvalid candidate:\n" + candidate + "\nValidation error:\n" + err.Error()
 		trace("repair.request", map[string]any{"content": repairRequest})
-		messages = []model.Message{{Role: model.RoleSystem, Content: messages[0].Content + "\nCorrect the validation error and emit the complete required output again."}, {Role: model.RoleUser, Content: repairRequest}}
+		messages = []model.Message{{Role: model.RoleSystem, Content: messages[0].Content + "\n" + repairGuidance(class, path)}, {Role: model.RoleUser, Content: repairRequest}}
 	}
 }

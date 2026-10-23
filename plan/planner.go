@@ -30,6 +30,11 @@ const planOutputToolName = "zhizhi_emit_plan"
 func NewModelPlanner(m model.Model) *ModelPlanner { return &ModelPlanner{Model: m} }
 
 func (p *ModelPlanner) Plan(ctx context.Context, input string, tools []model.ToolSpec) (Plan, error) {
+	return p.PlanWithFixer(ctx, input, tools, nil)
+}
+
+// PlanWithFixer 带规则修复的规划
+func (p *ModelPlanner) PlanWithFixer(ctx context.Context, input string, tools []model.ToolSpec, fixer *RuleFixer) (Plan, error) {
 	if p == nil || p.Model == nil {
 		return Plan{}, fmt.Errorf("planner: model is required")
 	}
@@ -52,7 +57,20 @@ func (p *ModelPlanner) Plan(ctx context.Context, input string, tools []model.Too
 	useToolOutput := p.Model.Capabilities().ToolCalling && !p.DisableOutputTool
 	modelInput := structuredModelInput([]model.Message{{Role: model.RoleSystem, Content: system}, {Role: model.RoleUser, Content: user}}, outputTool, useToolOutput)
 	p.trace("model.request", map[string]any{"messages": modelInput.Messages, "output_tool": outputTool, "tool_choice": modelInput.ToolChoice})
-	return generateCandidate(ctx, p.Model, "initial_plan", p.MaxRepairAttempts, useToolOutput, modelInput.Messages, outputTool, p.trace, func(candidate string) (Plan, error) { return decodePlan(candidate, tools) })
+
+	result, err := generateCandidate(ctx, p.Model, "initial_plan", p.MaxRepairAttempts, useToolOutput, modelInput.Messages, outputTool, p.trace, func(candidate string) (Plan, error) { return decodePlan(candidate, tools) })
+
+	// 如果规划失败且有 fixer,尝试规则修复
+	if err != nil && fixer != nil {
+		p.trace("planner.trying_rule_fixer", map[string]any{"error": err.Error()})
+		fixed, applied, fixErr := fixer.TryFix(result, err, tools)
+		if fixErr == nil && applied {
+			p.trace("planner.rule_fixer_success", map[string]any{"original_error": err.Error()})
+			return fixed, nil
+		}
+	}
+
+	return result, err
 }
 
 func structuredModelInput(messages []model.Message, outputTool model.ToolSpec, useTool bool) model.ModelInput {
@@ -81,13 +99,15 @@ func decodePlan(text string, tools []model.ToolSpec) (Plan, error) {
 	}
 	normalized, err := result.Normalize()
 	if err != nil {
-		return Plan{}, fmt.Errorf("invalid plan: %w", err)
+		// Return the decoded candidate: a rule fixer can repair a structurally
+		// complete plan that only a semantic rule rejected.
+		return result, fmt.Errorf("invalid plan: %w", err)
 	}
 	if len(normalized.Steps) == 0 {
-		return Plan{}, fmt.Errorf("invalid plan: initial plan must contain at least one executable step")
+		return normalized, fmt.Errorf("invalid plan: initial plan must contain at least one executable step")
 	}
 	if err := ValidateAgainstTools(normalized, tools); err != nil {
-		return Plan{}, fmt.Errorf("invalid plan: %w", err)
+		return normalized, fmt.Errorf("invalid plan: %w", err)
 	}
 	for _, step := range normalized.Steps {
 		encoded, err := json.Marshal(step.Input)
@@ -95,7 +115,7 @@ func decodePlan(text string, tools []model.ToolSpec) (Plan, error) {
 			return Plan{}, fmt.Errorf("encode input for step %q: %w", step.ID, err)
 		}
 		if bytes.Contains(encoded, []byte("{{")) {
-			return Plan{}, fmt.Errorf("invalid plan: step %q contains a template reference in input; use bindings instead", step.ID)
+			return normalized, fmt.Errorf("invalid plan: step %q contains a template reference in input; use bindings instead", step.ID)
 		}
 		if len(step.Bindings) == 0 && step.Input != nil {
 			for _, spec := range tools {
@@ -103,7 +123,7 @@ func decodePlan(text string, tools []model.ToolSpec) (Plan, error) {
 					continue
 				}
 				if err := tool.ValidateValue(spec.Function.Name, spec.Function.Parameters, step.Input); err != nil {
-					return Plan{}, fmt.Errorf("invalid plan input for step %q: %w; dependency values must use bindings", step.ID, err)
+					return normalized, fmt.Errorf("invalid plan input for step %q: %w; dependency values must use bindings", step.ID, err)
 				}
 				break
 			}
