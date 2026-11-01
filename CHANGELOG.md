@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.1.1 - 2026-11-01
+
+- Added opt-in execution of explicitly approved Skill Python scripts using the
+  official Docker Go SDK, disposable containers, and reusable images.
+- Added task-scoped workspaces, confined file snapshots, resource and output
+  limits, cancellation, cleanup, and structured script results.
+- Integrated script tools with existing Agent execution, confirmation,
+  checkpoint/resume, and observability mechanisms.
+- Added mock-based tests, opt-in Docker integration tests, and a runnable example
+  with a dependency-image Dockerfile.
+- Reorganized the English and Chinese READMEs around installation and usage,
+  added the Zhizhi official website, and aligned the SDK version with the release.
+
 ## 1.0.7 - 2026-09-14
 
 - Added a provider-neutral realtime `speech` contract, deliberately separated

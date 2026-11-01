@@ -19,16 +19,21 @@ import (
 	"github.com/cocoyes/zhizhi-agent-runtime/model"
 	"github.com/cocoyes/zhizhi-agent-runtime/observe"
 	"github.com/cocoyes/zhizhi-agent-runtime/skill"
+	"github.com/cocoyes/zhizhi-agent-runtime/skill/script"
 	"github.com/cocoyes/zhizhi-agent-runtime/tool"
 )
 
 // SkillOptions defines the application's delegation ceiling. An empty
 // AllowedTools grants no business tools. Request filters can only narrow it.
 type SkillOptions struct {
-	AllowedTools  []string
-	Searcher      skill.Searcher
-	MaxIterations int
-	MaxToolCalls  int
+	// ScriptExecutor is opt-in and application-owned; Agent never closes a
+	// shared executor. Only selected Skill runners receive its bound tool.
+	ScriptExecutor     script.Executor
+	ScriptConfirmation tool.ConfirmationPolicy
+	AllowedTools       []string
+	Searcher           skill.Searcher
+	MaxIterations      int
+	MaxToolCalls       int
 }
 type skillConfig struct {
 	catalog *skill.Catalog
@@ -49,7 +54,7 @@ func WithSkillProvider(catalog *skill.Catalog, options SkillOptions) Option {
 		seen := map[string]bool{}
 		unique := options.AllowedTools[:0]
 		for _, id := range options.AllowedTools {
-			if id == "skills.search" || id == "skills.invoke" || id == "skill.read_resource" {
+			if id == "skills.search" || id == "skills.invoke" || id == "skill.read_resource" || (id == "run_skill_script" && options.ScriptExecutor != nil) {
 				return errors.New("zhizhi: recursive skill delegation is forbidden")
 			}
 			if !seen[id] {
@@ -58,6 +63,12 @@ func WithSkillProvider(catalog *skill.Catalog, options SkillOptions) Option {
 			}
 		}
 		options.AllowedTools = unique
+		if options.ScriptConfirmation == "" {
+			options.ScriptConfirmation = tool.ConfirmationNever
+		}
+		if options.ScriptConfirmation != tool.ConfirmationNever && options.ScriptConfirmation != tool.ConfirmationAlways && options.ScriptConfirmation != tool.ConfirmationOnRisk {
+			return errors.New("zhizhi: invalid script confirmation policy")
+		}
 		if options.MaxIterations <= 0 {
 			options.MaxIterations = 8
 		}
@@ -100,16 +111,21 @@ type skillScope struct {
 	runID           string
 	resourceCalls   []middleware.ToolMiddleware
 	resourceStreams []middleware.ToolStreamMiddleware
+	filter          RunToolFilter
+	scriptWorkspace *script.Workspace
+	retainWorkspace bool
+	finishOnce      sync.Once
 }
 type skillScopeState struct {
-	Version int                         `json:"version"`
-	Grants  map[string]skillGrant       `json:"grants"`
-	Active  map[string]*skillInvocation `json:"active"`
+	Version         int                         `json:"version"`
+	Grants          map[string]skillGrant       `json:"grants"`
+	Active          map[string]*skillInvocation `json:"active"`
+	ScriptWorkspace *script.Workspace           `json:"script_workspace,omitempty"`
 }
 type skillScopeKey struct{}
 
 func newSkillScope(r *runtime, cfg *runConfig) *skillScope {
-	return &skillScope{grants: map[string]skillGrant{}, active: map[string]*skillInvocation{}, runtime: r, model: cfg.model, counter: cfg.counter, options: cloneMetadata(cfg.modelOptions), resourceCalls: append(append([]middleware.ToolMiddleware(nil), r.cfg.toolMiddleware...), cfg.toolMiddleware...), resourceStreams: append(append([]middleware.ToolStreamMiddleware(nil), r.cfg.toolStreamMiddleware...), cfg.toolStreamMiddleware...)}
+	return &skillScope{grants: map[string]skillGrant{}, active: map[string]*skillInvocation{}, runtime: r, model: cfg.model, counter: cfg.counter, options: cloneMetadata(cfg.modelOptions), filter: cfg.filter, resourceCalls: append(append([]middleware.ToolMiddleware(nil), r.cfg.toolMiddleware...), cfg.toolMiddleware...), resourceStreams: append(append([]middleware.ToolStreamMiddleware(nil), r.cfg.toolStreamMiddleware...), cfg.toolStreamMiddleware...)}
 }
 func withSkillScope(ctx context.Context, s *skillScope) context.Context {
 	if s == nil {
@@ -124,7 +140,7 @@ func saveSkillScope(ctx context.Context) (json.RawMessage, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return json.Marshal(skillScopeState{Version: 1, Grants: s.grants, Active: s.active})
+	return json.Marshal(skillScopeState{Version: 1, Grants: s.grants, Active: s.active, ScriptWorkspace: s.scriptWorkspace})
 }
 
 func skillUsage(ctx context.Context, outer model.Usage) model.Usage {
@@ -357,7 +373,7 @@ type skillExecutor struct {
 
 func (e *skillExecutor) Execute(ctx context.Context, loaded skill.Loaded, task string) (tool.Result, error) {
 	s, inv, key := e.scope, e.invocation, e.key
-	values := s.businessTools()
+	values := s.executionTools(loaded)
 	permissions := catalogFingerprint(tool.NewRegistry(values...))
 	if inv.Permissions != "" && inv.Permissions != permissions {
 		return tool.Result{}, skill.ErrCatalogDrift
@@ -464,7 +480,7 @@ func (s *skillScope) restore(ctx context.Context, raw json.RawMessage) error {
 		if err != nil {
 			return err
 		}
-		if inv.Permissions != catalogFingerprint(tool.NewRegistry(s.businessTools()...)) {
+		if inv.Permissions != catalogFingerprint(tool.NewRegistry(s.executionTools(loaded)...)) {
 			return skill.ErrCatalogDrift
 		}
 		for path, hash := range inv.Resources {
@@ -472,6 +488,15 @@ func (s *skillScope) restore(ctx context.Context, raw json.RawMessage) error {
 			if err != nil || hash != actual {
 				return skill.ErrCatalogDrift
 			}
+		}
+	}
+	if state.ScriptWorkspace != nil {
+		executor := s.runtime.cfg.skillConfig.options.ScriptExecutor
+		if executor == nil || state.ScriptWorkspace.Owner != s.runID {
+			return skill.ErrCatalogDrift
+		}
+		if err := executor.ValidateWorkspace(ctx, *state.ScriptWorkspace); err != nil {
+			return err
 		}
 	}
 	if state.Grants == nil {
@@ -482,6 +507,7 @@ func (s *skillScope) restore(ctx context.Context, raw json.RawMessage) error {
 	}
 	s.grants = state.Grants
 	s.active = state.Active
+	s.scriptWorkspace = state.ScriptWorkspace
 	return nil
 }
 

@@ -1,94 +1,67 @@
 # zhizhi-agent-runtime
 
 <p align="center">
-  <img src="zhizhi-logo.png" alt="Zhizhi Agent Runtime Logo" width="720">
+  <img src="zhizhi-logo.png" alt="Zhizhi agent runtime" width="720">
 </p>
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/cocoyes/zhizhi-agent-runtime.svg)](https://pkg.go.dev/github.com/cocoyes/zhizhi-agent-runtime)
 [![Go Report Card](https://goreportcard.com/badge/github.com/cocoyes/zhizhi-agent-runtime)](https://goreportcard.com/report/github.com/cocoyes/zhizhi-agent-runtime)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-[English README](README.md)
+[English](README.md) · [知枝官网](https://deepyou.top) · [API 文档](https://pkg.go.dev/github.com/cocoyes/zhizhi-agent-runtime) · [更新日志](CHANGELOG.md)
 
-[架构与包边界](docs/architecture.md)
+**知枝（Zhizhi）是一个用 Go 构建 AI Agent 的运行框架。** 接入模型、把业务函数注册为工具，Agent 就可以根据用户需求调用工具完成任务。对于多步骤任务，框架提供规划、并行执行、条件分支和有限次数的失败恢复。
 
-[规划稳定性修复与迁移](docs/runtime-stability.md)（统一步骤契约、首次恢复、硬预算和 checkpoint v2）
+你可以把它嵌入 Go 服务、智能助手或自动化应用：业务侧提供模型和工具，知枝负责工具调度、预算控制、审批暂停与恢复，以及执行证据记录。
 
-面向生产环境的 Go Agent Runtime，帮助 Agent 完成规划、工具调用、失败恢复和全过程审计。
+## 可以用来做什么
 
-1.0.7 新增与普通 LLM 调用解耦的实时双工语音接口，以及支持函数调用的豆包适配器；
-接入说明见 [豆包实时语音](docs/doubao-realtime-speech.md)。
+- **智能助手**：对话、流式输出、多模态输入和类型化函数调用。
+- **任务自动化**：ReAct 工具循环，以及带依赖关系和失败恢复的 Plan-and-Execute 工作流。
+- **外部能力接入**：连接 MCP 服务，按需发现和加载本地 Skill。
+- **文档处理**：在一次性 Docker 容器中运行经过授权的 Skill Python 脚本。
+- **可审计的业务流程**：权限检查、操作确认、断点恢复、执行追踪和动作回执。
+- **语音应用**：独立的实时语音 API 和豆包双工语音适配器。
 
-Zhizhi 把普通 Go 函数注册成经过校验的工具，把复杂需求编排成依赖安全的执行计划，并对条件分支、重规划和副作用进行显式控制。
+## 安装
 
-## 核心能力
-
-- 类型安全的工具函数，自动生成 JSON Schema 并校验输入/输出
-- Chat、Streaming、能力路由和模型驱动的复杂任务规划
-- 依赖图、并行批次、条件分支和跨步骤证据绑定
-- 必需步骤失败后的有限次重规划
-- 重试、Fallback、超时、预算和并发限制
-- Guard、确认门禁、Action Receipt 和副作用保护
-- MCP 接入、工具 Allowlist 和信任边界控制
-- JSONL 链路追踪、Evidence、Warnings 和运行统计
-
-Agent 生命周期清晰可见：
-
-```text
-请求 -> 路由 -> 规划 -> 执行 -> 记录证据 -> 重规划 -> 最终回复
-```
-
-## 环境要求
-
-- Go 1.25 或更高版本
-- OpenAI 兼容的 Chat Completions 接口
-
-内置适配器请求 `{LLM_BASE_URL}/chat/completions`，支持标准 Chat Completions 响应，也支持 Responses 风格的 `output_text` 或 `output[].content[].text` 文本响应。内部工具 ID 可以使用点号，适配器只在发送给模型时转换为合法的 wire 名称。
-
-DeepSeek、豆包等混合推理模型可通过适配器显式控制思考模式：
-
-```go
-model := openaicompat.New(openaicompat.Config{
-    BaseURL:         os.Getenv("LLM_BASE_URL"),
-    APIKey:          os.Getenv("LLM_API_KEY"),
-    Model:           os.Getenv("LLM_MODEL"),
-    Thinking:        openaicompat.ThinkingEnabled, // 或 ThinkingDisabled / ThinkingAuto
-    ReasoningEffort: "high",
-})
-```
-
-适配器会发送 `thinking: {"type":"..."}`，并且仅在调用方显式配置时发送顶层 `reasoning_effort`。思考模式结合工具调用时，返回的 `reasoning_content` 会在同一轮后续请求中自动回传。未配置时，`thinking` 默认使用 `ThinkingDisabled`，`reasoning_effort` 则完全不发送，由调用方或 provider 决定。具体枚举范围仍取决于 provider 和模型版本。示例 10 也支持环境变量 `LLM_THINKING` 和 `LLM_REASONING_EFFORT`。
-
-排查规划或工具参数问题时，可启用详细 JSONL：
-
-```go
-zhizhi.WithObserver(observe.NewJSONL(os.Stdout, observe.WithDetails()))
-```
-
-详细模式会记录 planner/replanner 的模型请求、原始响应和修复重试、每个步骤的实际输入/输出/错误、最终 patch，以及最终合成请求与响应。它可能包含用户或业务数据，因此默认关闭；示例 10 已显式开启。
-
-模型结构化输出不再由运行时手写拆解：非标准 JSON 的提取和修复使用 `jsonrepair-go`，常见弱类型漂移使用 `mapstructure/v2`，跨步骤路径按 RFC 6901 交给 `go-openapi/jsonpointer`。语法修复后仍须通过计划、JSON Schema 和 patch 应用校验，不会因“能反序列化”就继续执行。
-
-Planner 和 Replanner 的主路径参考 Eino 的结构化输出设计：从 Go 类型生成 JSON Schema，将 Plan 或 Patch 作为唯一的 synthetic output tool，并使用强制 `tool_choice`，只消费该工具的 arguments。普通 JSON 文本仅作为不支持工具调用模型的兼容路径；业务工具只作为规划目录，不会在规划阶段被调用。
-
-## 安装与最小示例
+需要 **Go 1.25+** 和模型服务。内置适配器支持 OpenAI 兼容的 Chat Completions 接口，也可以实现 `model.Model` 接入其他模型。工具调用场景需要模型支持 Tool Calling。Docker 为可选依赖，仅执行 Skill 脚本时需要。
 
 ```bash
-go get github.com/cocoyes/zhizhi-agent-runtime
+go get github.com/cocoyes/zhizhi-agent-runtime@v1.1.1
 ```
 
+## 快速开始
+
 ```go
-model := openaicompat.New(openaicompat.Config{
-    BaseURL: os.Getenv("LLM_BASE_URL"),
-    APIKey: os.Getenv("LLM_API_KEY"),
-    Model: os.Getenv("LLM_MODEL"),
-})
-agent, err := zhizhi.New(zhizhi.WithModel(model))
-if err != nil { log.Fatal(err) }
-defer agent.Close(context.Background())
-response, err := agent.Run(context.Background(), zhizhi.Request{Input: "总结最新的客服请求"})
-if err != nil { log.Fatal(err) }
-fmt.Println(response.Text)
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "os"
+
+    zhizhi "github.com/cocoyes/zhizhi-agent-runtime"
+    "github.com/cocoyes/zhizhi-agent-runtime/adapter/model/openaicompat"
+)
+
+func main() {
+    model := openaicompat.New(openaicompat.Config{
+        BaseURL: os.Getenv("LLM_BASE_URL"),
+        APIKey:  os.Getenv("LLM_API_KEY"),
+        Model:   os.Getenv("LLM_MODEL"),
+    })
+    agent, err := zhizhi.New(zhizhi.WithModel(model))
+    if err != nil { log.Fatal(err) }
+    defer agent.Close(context.Background())
+
+    response, err := agent.Run(context.Background(), zhizhi.Request{
+        Input: "用三句话介绍 AI Agent 能做什么",
+    })
+    if err != nil { log.Fatal(err) }
+    fmt.Println(response.Text)
+}
 ```
 
 ```bash
@@ -98,50 +71,13 @@ export LLM_MODEL="your-model"
 go run ./examples/00-chat
 ```
 
-接口可以返回标准 Chat Completions 响应：
+在自己的 Go module 中将上述代码保存为 `main.go`，设置环境变量后执行 `go run .`。如果使用仓库示例，请先克隆仓库，在仓库根目录运行 `go run ./examples/00-chat`。`LLM_BASE_URL` 填 API 基础地址，例如 `https://your-provider.example/v1`，适配器会追加 `/chat/completions`。
 
-```json
-{"choices":[{"message":{"role":"assistant","content":"..."}}]}
-```
+下文片段基于快速开始，假设 `model` 已配置、`ctx` 为当前请求的 Context。请补充标注的包导入，在使用 Agent 前处理初始化错误，并在结束时关闭 Agent 和流。
 
-也支持 Responses 风格的文本响应：
+## 把 Go 函数注册为工具
 
-```json
-{"output_text":"..."}
-```
-
-## P0 执行契约
-
-消息可通过 `model.UserMessage`、`model.TextPart` 和 `model.ImageURLPart`
-表达有序的文本/图片内容块。模型调用支持 `auto`、`none`、`required`、
-指定工具四种选择模式，以及 `text`、`json_object`、严格 `json_schema`
-响应格式。Adapter 必须声明实际能力，不支持的内容会明确报错，不会静默丢弃。
-
-每次运行可追加或筛选一份不可变工具快照，并设置请求级 Option：
-
-```go
-response, err := agent.Run(ctx, request,
-    zhizhi.WithRunTools(requestTools...),
-    zhizhi.WithRunToolFilter(allowForRequest),
-    zhizhi.WithRunObserver(requestObserver),
-    zhizhi.WithRunMetadata(metadata),
-    zhizhi.WithRunResponseFormat(format),
-)
-```
-
-Agent、Model、Model Stream、Tool、Tool Stream、Planner、Replanner 均支持
-全局和请求级 middleware。`Stream` 在多轮工具调用和 complex 模式中输出稳定的
-run/model/tool/plan/step 生命周期事件。Complex 计划既支持确定性工具步骤，也支持
-带能力 allowlist 与工具预算的有限 Agentic Step。成功、失败和暂停结果均保留截至
-当前的累计 usage 与执行统计。
-可选 OpenTelemetry 集成位于 `adapter/otel`，提供各执行边界的 middleware 与事件
-observer，核心 runtime 不感知 OTel API。
-
-本地运行时请参考 `.env.example` 设置真实的 provider 地址、API Key 和模型。运行时不会伪造模型结果：规划、工具选择、重规划和最终回复都会调用你配置的真实模型。
-
-## 注册工具
-
-工具就是普通的类型化 Go 函数，运行时自动生成并校验 Schema：
+普通 Go 函数通过 `tool.Func` 转为工具，框架自动生成 JSON Schema，并在运行时校验参数和结果：
 
 ```go
 type WeatherInput struct {
@@ -155,89 +91,132 @@ type WeatherOutput struct {
 
 weather := tool.Func(
     "weather.current",
-    "查询指定城市的当前天气",
+    "Get the current weather for a city",
     func(ctx context.Context, in WeatherInput) (WeatherOutput, error) {
-        return WeatherOutput{City: in.City, Condition: "晴朗", Temperature: 27}, nil
+        return WeatherOutput{City: in.City, Condition: "sunny", Temperature: 27}, nil
     },
     tool.WithCapabilities("weather.current"),
 )
 agent, err := zhizhi.New(zhizhi.WithModel(model), zhizhi.WithTools(weather))
 ```
 
-工具描述会提供给模型。描述清楚工具用途和适用场景，保持工具 ID 稳定且具体；模型负责选择，运行时负责解析并执行已注册实现。
+导入 `github.com/cocoyes/zhizhi-agent-runtime/tool`，再向 Agent 询问城市天气即可。上面的天气结果是演示数据，实际使用时将函数体替换成业务 API 调用。工具描述应说明用途和适用场景，工具 ID 应保持稳定。参见[完整工具示例](examples/02-function-tool/main.go)。
 
-## 复杂任务与条件分支
+## 流式输出
 
-多步骤任务使用 `RunModeAgentComplex`。内置 planner 会根据用户目标和工具目录选择工具并建立依赖图，无需在业务代码中手写 planner：
+```go
+stream, err := agent.Stream(ctx, zhizhi.Request{Input: "给我讲个小故事"})
+if err != nil { return err }
+defer stream.Close()
+for {
+    event, err := stream.Recv(ctx)
+    if errors.Is(err, io.EOF) { break }
+    if err != nil { return err }
+    fmt.Print(event.TextDelta)
+}
+```
+
+接收循环需要导入 `errors` 和 `io`。流中也包含工具和执行生命周期事件，参见[流式示例](examples/01-stream/main.go)。
+
+## 执行多步骤任务
 
 ```go
 ctx := context.Background()
 mode := zhizhi.RunModeAgentComplex
 response, err := agent.Run(ctx, zhizhi.Request{
-    Input: "根据天气安排今晚深圳的活动",
+    Input: "根据深圳天气安排今晚的活动",
     Mode: &mode,
 })
 ```
 
-示例中的 `ctx` 应替换为请求级上下文，并按业务设置超时和取消策略。
+先注册完成任务所需的工具，再选择复杂模式。框架会生成依赖图、传递前置步骤结果、并行运行独立步骤，并在必需步骤失败时按预算重规划。参见[完整 Agent 示例](examples/10-full-agent)和[家庭事务工作流](examples/11-household-workflow)。
 
-计划可以根据前置证据选择分支：
-
-```json
-{
-  "version": 1,
-  "steps": [
-    {"id":"weather", "capability":"weather.current", "input":{"city":"深圳"}},
-    {"id":"outdoor", "capability":"activity.outdoor", "depends_on":["weather"], "condition":{"source_step":"weather","source_path":"outdoor_suitable","equals":true}, "bindings":[{"source_step":"weather","source_path":"temperature","target_path":"temperature"}]},
-    {"id":"indoor", "capability":"activity.indoor", "depends_on":["weather"], "condition":{"source_step":"weather","source_path":"outdoor_suitable","equals":false}},
-    {"id":"compose", "capability":"itinerary.compose", "depends_on":["outdoor","indoor"]}
-  ]
-}
-```
-
-条件来源必须是当前步骤的依赖。条件不满足时步骤会被跳过，不会调用工具。`bindings` 将前一步证据注入后续工具的类型化输入。必需步骤失败时，运行时默认允许一次有限重规划，在保留成功步骤的同时替换失败步骤。
-
-完整流程：
-
-```bash
-go run ./examples/10-full-agent
-```
-
-## 副作用保护
-
-为写操作声明副作用、幂等性、风险等级和确认策略：
+## 接入 MCP 服务
 
 ```go
-sendEmail := tool.Func(
-    "mail.send", "向指定收件人发送邮件", sendEmailImpl,
-    tool.WithCapabilities("mail.send"),
-    tool.WithSideEffect(tool.SideEffectWriteNonIdempotent),
-    tool.WithIdempotency(tool.IdempotencyNonIdempotent),
-    tool.WithRisk(tool.RiskHigh),
-    tool.WithConfirmation(tool.ConfirmationAlways),
-)
+// import runtimemcp "github.com/cocoyes/zhizhi-agent-runtime/mcp"
 agent, err := zhizhi.New(
-    zhizhi.WithModel(model), zhizhi.WithTools(sendEmail),
-    zhizhi.WithGuard(authorize),
-    zhizhi.WithConfirmation(askUser),
+    zhizhi.WithModel(model),
+    zhizhi.WithMCP(runtimemcp.Config{
+        ID: "internal-tools",
+        Transport: runtimemcp.TransportStreamableHTTP,
+        Endpoint: "https://tools.example.com/mcp",
+        AllowTools: []string{"customer.lookup", "ticket.search"},
+    }),
 )
 ```
 
-没有确认时，副作用工具不会执行，响应会返回 `CONFIRMATION_REQUIRED` 的 `ActionReceipt`。外部系统结果不明确时会显式标记，不能当作成功处理。
+默认懒连接，通过 `AllowTools` 限制可用工具。连接多个服务时，可组合 `mcp.NewCapabilityProvider` 与 `zhizhi.WithMCPCapabilityProvider`，先让模型选择服务，再加载该服务的工具列表。参见 [MCP 客户端示例](examples/06-mcp-client/README.md)。
 
-### 暂停与恢复
+## 按需加载本地 Skill
 
-Agent 默认使用进程内 checkpoint store；生产环境可通过
-`WithCheckpointStore` 注入持久化实现。确认请求返回 `Suspended` 和
-`Checkpoint` 后，调用 `agent.Resume(ctx, zhizhi.ResumeRequest{RunID:
-resp.RunID, Checkpoint: resp.Checkpoint, Decision: true}, runOptions...)` 即可从原状态继续；
-若原运行使用请求级动态工具，恢复时需传入同一组工具 Option。
+Skill 是包含 `SKILL.md` 的目录。文件头部提供名称、描述，正文说明如何完成任务：
 
-Checkpoint 带版本和工具目录指纹。恢复时已完成步骤与成功写入 receipt
-只回放结果、不重复调用工具；`UNKNOWN` receipt 禁止自动重试；旧 checkpoint
-即使在恢复后再次暂停也会失效，避免旧确认令牌重放写操作。
+```text
+skills/
+└── greeting/
+    └── SKILL.md
+```
 
-## 可靠性控制
+```markdown
+---
+name: greeting
+description: Compose a short greeting for a named person.
+---
+Ask for the person's name if it is missing, then write a friendly greeting.
+```
+
+```go
+// import "github.com/cocoyes/zhizhi-agent-runtime/skill"
+catalog := skill.NewCatalog(skill.CatalogOptions{})
+if _, err := catalog.LoadRoot(ctx, "./skills"); err != nil {
+    return err
+}
+agent, err := zhizhi.New(
+    zhizhi.WithModel(model),
+    zhizhi.WithSkillProvider(catalog, zhizhi.SkillOptions{}),
+)
+```
+
+`LoadRoot` 将名称、描述和目录索引到内存。重复调用会原子更新该根目录，扫描失败时保留原有索引。模型通过 `skills.search` 查找候选，通过 `skills.invoke` 选定后才加载正文，不会在每次请求中暴露全部 Skill。
+
+如果 Skill 需要业务工具，使用 `WithTools` 注册，并在 `SkillOptions.AllowedTools` 中列出允许的工具 ID；空列表不授予业务工具。参见 [Skill 使用指南](docs/runtime-skills.md)和[离线示例](examples/14-skills)。
+
+### 使用 Docker 执行经过授权的 Python 脚本
+
+安装 Docker Engine，加载 Skill 目录，再显式注册允许执行的入口。下面假设目录中已有 `test-skill`，并包含 `scripts/hello.py`：
+
+```go
+// import "github.com/cocoyes/zhizhi-agent-runtime/skill/script"
+// import dockerscript "github.com/cocoyes/zhizhi-agent-runtime/skill/script/docker"
+executor, err := dockerscript.New(ctx, dockerscript.Config{
+    Enabled: true,
+    Catalog: catalog,
+    Image: "python:3.12-slim",
+    AutoPull: true,
+    Registrations: []script.Registration{{
+        SkillID: "test-skill",
+        Scripts: []script.EntryPoint{{Path: "scripts/hello.py"}},
+    }},
+})
+if err != nil { return err }
+defer executor.Close(context.Background())
+
+agent, err := zhizhi.New(
+    zhizhi.WithModel(model),
+    zhizhi.WithSkillProvider(catalog, zhizhi.SkillOptions{
+        ScriptExecutor: executor,
+    }),
+)
+```
+
+只有选定 Skill 的内部执行器会获得 `run_skill_script`。每次调用使用独立临时容器，执行后销毁容器、复用镜像；任务输出文件可通过执行器读取。宿主机无需安装 Python，也无需手动创建容器。开启 `AutoPull` 后，首次运行会按需下载镜像。
+
+默认使用非 root 用户、只读 Skill 挂载、禁用网络，并限制 CPU、内存、执行时间和输出。该能力面向经过审核的 Skill。Docker API 权限很高，需要保护持有该权限的服务进程。参见[配置与安全边界](docs/docker-skill-scripts.md)、[可运行示例](examples/15-docker-skills/README.md)和[依赖镜像 Dockerfile](examples/15-docker-skills/Dockerfile)。
+
+## 控制执行并查看结果
+
+通过 `context.Context` 传递请求超时和取消信号，通过 `WithBudget` 设置执行上限：
 
 ```go
 zhizhi.WithBudget(zhizhi.Budget{
@@ -247,61 +226,36 @@ zhizhi.WithBudget(zhizhi.Budget{
 })
 ```
 
-默认策略只重试瞬时、可安全重复且幂等的失败；写操作不会被静默重复执行。
-
-## MCP 与可观测性
+有副作用的工具应声明 `tool.WithSideEffect`、`tool.WithIdempotency` 和 `tool.WithConfirmation`。使用 `WithGuard` 检查权限，使用 `WithConfirmation` 接入审批决策。执行暂停后，可通过 checkpoint 恢复：
 
 ```go
-import (
-    "os"
-    runtimemcp "github.com/cocoyes/zhizhi-agent-runtime/mcp"
-    "github.com/cocoyes/zhizhi-agent-runtime/observe"
-)
-
 agent, err := zhizhi.New(
     zhizhi.WithModel(model),
-    zhizhi.WithMCP(runtimemcp.Config{
-        ID: "internal-tools", Transport: runtimemcp.TransportStreamableHTTP,
-        Endpoint: "https://tools.example.com/mcp",
-        ConnectionStrategy: runtimemcp.ConnectionLazy,
-        Required: false,
-        AllowTools: []string{"customer.lookup", "ticket.search"},
-        DenyTools: []string{"admin.delete"},
-    }),
+    zhizhi.WithTools(sendEmail),
+    zhizhi.WithCheckpointStore(durableStore),
 )
-observer := observe.NewJSONL(os.Stdout)
-```
 
-MCP 默认懒连接，并发首次访问只建立一个 session；可选服务故障不会阻止
-Agent 创建，`Required` 服务不可用时则明确失败。Provider 支持目录刷新、
-版本/指纹、重连退避、取消和有界关闭。MCP 工具属于不可信边界，详见
-[SECURITY.md](SECURITY.md)。响应提供 `Evidence`、`Actions`、`Warnings` 和完整运行统计。
-
-## 按需加载本地 Skill
-
-```go
-// import "github.com/cocoyes/zhizhi-agent-runtime/skill"
-catalog := skill.NewCatalog(skill.CatalogOptions{})
-report, err := catalog.LoadRoot(ctx, "/srv/skills")
 if err != nil { return err }
-_ = report
-agent, err := zhizhi.New(
-    zhizhi.WithModel(model),
-    zhizhi.WithTools(documentRead),
-    zhizhi.WithSkillProvider(catalog, zhizhi.SkillOptions{
-        AllowedTools: []string{"documents.read"},
-    }),
-)
+defer agent.Close(context.Background())
+
+pending, err := agent.Run(ctx, request)
+if err != nil { return err }
+if pending.Suspended {
+    completed, err := agent.Resume(ctx, zhizhi.ResumeRequest{
+        RunID: pending.RunID, Checkpoint: pending.Checkpoint, Decision: true,
+    }) // Pass the same run options here if the original request used them.
+    if err != nil { return err }
+    fmt.Println(completed.Text)
+}
 ```
 
-重复调用 `LoadRoot` 会原子替换该根目录的索引；扫描或解析失败时保留旧快照。
-内存保存所有 Skill 的名称、描述和目录，模型仅看到固定的 `skills.search`、
-`skills.invoke`。搜索默认返回 5 个候选、最多 10 个，选定后才读取正文并执行。
-`AllowedTools` 为空表示不授予业务工具；内部调用沿用请求预算和确认策略，
-暂停恢复不重放已完成动作。详见 [Skill 契约](docs/runtime-skills.md) 和
-[离线示例](examples/14-skills)。
+上例假设已注册 `sendEmail` 工具，并准备好 checkpoint store 和请求变量。恢复时需要提供相同的请求级工具；跨进程恢复应使用持久化 checkpoint store。
+
+响应中包含 `Text`、`Evidence`、`Actions`、`Warnings` 和执行统计。可添加 `zhizhi.WithObserver(observe.NewJSONL(os.Stdout))` 记录事件，或使用 `adapter/otel` 接入 OpenTelemetry。详细 JSONL 需要显式开启，可能包含业务数据。
 
 ## 示例目录
+
+多数模型示例读取 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL`，参见 [.env.example](.env.example)。示例 14 可离线运行；示例 15 使用确定性模型和真实 Docker Engine。
 
 | 示例 | 内容 | 命令 |
 | --- | --- | --- |
@@ -317,21 +271,20 @@ agent, err := zhizhi.New(
 | `09-config-agent` | YAML 配置 | `go run ./examples/09-config-agent` |
 | `10-full-agent` | 条件、绑定、replan 和组合 | `go run ./examples/10-full-agent` |
 | `11-household-workflow` | 真实模型驱动的并行、条件绑定与故障重规划 | `go run ./examples/11-household-workflow` |
+| `12-doubao-realtime` | 实时双工语音 | [README](examples/12-doubao-realtime/README.md) |
 | `13-parallel-search` | 通过 Parallel Search MCP 进行无需密钥的可选网页研究 | `go run ./examples/13-parallel-search` |
 | `14-skills` | 离线 Skill 发现、按需加载和受限执行 | `go run ./examples/14-skills` |
+| `15-docker-skills` | 在临时 Docker 容器内执行已批准的 Python 脚本 | `go run ./examples/15-docker-skills` |
 
-## 开发与验证
+## 进一步阅读
 
-```bash
-go fmt ./...
-go vet ./...
-go test ./...
-go test -race ./...
-go build ./...
-```
-
-`make verify` 会执行标准本地检查。真实 provider 测试需要显式开启，默认测试套件离线且确定性可复现。
+- [架构与扩展点](docs/architecture.md)
+- [Skill 加载和执行契约](docs/runtime-skills.md)
+- [Docker 脚本配置与安全](docs/docker-skill-scripts.md)
+- [实时语音接入](docs/doubao-realtime-speech.md)
+- [运行时兼容性与迁移](docs/runtime-stability.md)
+- [版本更新记录](CHANGELOG.md)
 
 ## 安全与许可
 
-涉及工具执行、副作用、计划语义和 provider 兼容性的变更都应配套专项测试。请私下报告安全漏洞，并附上受影响版本、最小复现和影响说明。详见 [SECURITY.md](SECURITY.md) 和 [LICENSE](LICENSE)。
+发现安全问题请按照 [SECURITY.md](SECURITY.md) 私下报告。本项目采用 [MIT License](LICENSE)。

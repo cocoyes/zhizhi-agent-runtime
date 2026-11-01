@@ -318,22 +318,32 @@ func (c *Catalog) Load(ctx context.Context, name, fingerprint string) (Loaded, e
 
 // ReadResource reads bounded UTF-8 text confined to this Skill directory.
 func (l Loaded) ReadResource(ctx context.Context, path string, max int64) (string, string, error) {
-	if path == "" || filepath.IsAbs(path) || !within(l.Dir, filepath.Join(l.Dir, path)) {
-		return "", "", ErrResourceDenied
-	}
-	resolved, err := filepath.EvalSymlinks(filepath.Join(l.Dir, path))
-	if err != nil || !within(l.Dir, resolved) {
-		return "", "", ErrResourceDenied
-	}
-	b, err := readBounded(ctx, resolved, max)
+	b, hash, err := l.ReadFile(ctx, path, max)
 	if err != nil {
-		if ctx.Err() != nil {
-			return "", "", ctx.Err()
-		}
-		return "", "", fmt.Errorf("%w: unreadable resource", ErrResourceDenied)
+		return "", "", err
 	}
 	if !utf8.Valid(b) || bytes.IndexByte(b, 0) >= 0 {
 		return "", "", fmt.Errorf("%w: resource is not text", ErrResourceDenied)
 	}
-	return string(b), digest(b), nil
+	return string(b), hash, nil
+}
+
+// ReadFile reads bounded binary or text bytes confined to this Skill root.
+// It supports explicit script/asset approval without relaxing text tool limits.
+func (l Loaded) ReadFile(ctx context.Context, path string, max int64) ([]byte, string, error) {
+	if path == "" || filepath.IsAbs(path) || !within(l.Dir, filepath.Join(l.Dir, path)) {
+		return nil, "", ErrResourceDenied
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(l.Dir, path))
+	if err != nil || !within(l.Dir, resolved) {
+		return nil, "", ErrResourceDenied
+	}
+	b, err := readBounded(ctx, resolved, max)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, "", ctx.Err()
+		}
+		return nil, "", fmt.Errorf("%w: unreadable resource", ErrResourceDenied)
+	}
+	return b, digest(b), nil
 }

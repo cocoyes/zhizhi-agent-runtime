@@ -423,6 +423,7 @@ func (r *runtime) saveCheckpoint(ctx context.Context, registry *tool.Registry, r
 	if err := r.cfg.checkpointStore.Save(ctx, value); err != nil {
 		return "", err
 	}
+	markSkillSuspended(ctx)
 	r.emit(observe.Event{Type: "run.suspended", RunID: runID, Data: map[string]any{"reason": value.Reason, "checkpoint": id}})
 	return id, nil
 }
@@ -457,6 +458,7 @@ func (r *runtime) saveComplexCheckpoint(ctx context.Context, registry *tool.Regi
 	if err := r.cfg.checkpointStore.Save(ctx, value); err != nil {
 		return "", err
 	}
+	markSkillSuspended(ctx)
 	r.emit(observe.Event{Type: "run.suspended", RunID: runID, PlanVersion: state.Plan.Version, StepID: pending.StepID, ToolID: pending.ToolID, Data: map[string]any{"reason": value.Reason, "checkpoint": id}})
 	return id, nil
 }
@@ -595,6 +597,7 @@ func (r *runtime) Resume(ctx context.Context, req ResumeRequest, options ...RunO
 		if runCfg.skills == nil {
 			return nil, checkpoint.ErrCatalogDrift
 		}
+		runCfg.skills.runID = value.RunID
 		if err := runCfg.skills.restore(ctx, value.SkillState); err != nil {
 			return nil, err
 		}
@@ -641,6 +644,7 @@ func (r *runtime) Resume(ctx context.Context, req ResumeRequest, options ...RunO
 		if err := r.cfg.checkpointStore.Delete(ctx, value.ID); err != nil {
 			return nil, err
 		}
+		runCfg.skills.finish()
 		return &Response{RunID: value.RunID, Outcome: contract.OutcomeDegraded, Warnings: []contract.Warning{{Code: "CONFIRMATION_REJECTED", Message: "tool execution was rejected"}}, Actions: value.Actions}, nil
 	}
 	if runCfg.skills != nil && value.Pending != nil {
@@ -668,6 +672,7 @@ func (r *runtime) Resume(ctx context.Context, req ResumeRequest, options ...RunO
 		if err := r.cfg.checkpointStore.Delete(ctx, value.ID); err != nil {
 			return nil, err
 		}
+		defer runCfg.skills.finish()
 		response, resumeErr := r.resumeComplex(ctx, value, state, registry, runCfg)
 		return response, resumeErr
 	}
@@ -683,6 +688,7 @@ func (r *runtime) Resume(ctx context.Context, req ResumeRequest, options ...RunO
 	if err := r.cfg.checkpointStore.Delete(ctx, value.ID); err != nil {
 		return nil, err
 	}
+	defer runCfg.skills.finish()
 	response, err = r.resumeSimple(ctx, value.RunID, state, registry, runCfg.model)
 	return response, err
 }
@@ -987,6 +993,7 @@ func (r *runtime) run(ctx context.Context, req Request, options ...RunOption) (r
 	if err != nil {
 		return nil, err
 	}
+	defer runCfg.skills.finish()
 	defer func() {
 		if response != nil {
 			calls, usage := runCfg.counter.snapshot()
@@ -1168,6 +1175,7 @@ func (r *runtime) run(ctx context.Context, req Request, options ...RunOption) (r
 }
 
 func (r *runtime) runComplex(ctx context.Context, req Request, runID string, registry *tool.Registry, runCfg runConfig) (response *Response, returnErr error) {
+	defer runCfg.skills.finish()
 	if runCfg.skills != nil {
 		runCfg.skills.runID = runID
 		runCfg.skills.stream = false
@@ -1908,6 +1916,9 @@ type eventStream struct {
 
 func (s *eventStream) deliver(event Event) (Event, error) {
 	if event.Response != nil {
+		if scope, ok := s.ctx.Value(skillScopeKey{}).(*skillScope); ok {
+			scope.finish()
+		}
 		event.Response.Usage = skillUsage(s.ctx, event.Response.Usage)
 		event.Response.Stats.PromptTokens = event.Response.Usage.PromptTokens
 		event.Response.Stats.CompletionTokens = event.Response.Usage.CompletionTokens
@@ -2150,6 +2161,9 @@ func (s *eventStream) Close() error {
 	s.closed = true
 	if s.cancel != nil {
 		s.cancel()
+	}
+	if scope, ok := s.ctx.Value(skillScopeKey{}).(*skillScope); ok {
+		scope.finish()
 	}
 	s.doneOnce.Do(s.onDone)
 	return s.stream.Close()

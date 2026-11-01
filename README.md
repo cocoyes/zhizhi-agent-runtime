@@ -1,7 +1,5 @@
 # zhizhi-agent-runtime
 
-See [runtime stability and migration](docs/runtime-stability.md) for the shared planning contract, opt-in initial recovery, hard call budgets, and checkpoint v2.
-
 <p align="center">
   <img src="zhizhi-logo.png" alt="Zhizhi agent runtime" width="720">
 </p>
@@ -10,85 +8,27 @@ See [runtime stability and migration](docs/runtime-stability.md) for the shared 
 [![Go Report Card](https://goreportcard.com/badge/github.com/cocoyes/zhizhi-agent-runtime)](https://goreportcard.com/report/github.com/cocoyes/zhizhi-agent-runtime)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-[中文文档](README.zh-CN.md)
+[中文文档](README.zh-CN.md) · [Zhizhi Official Website](https://deepyou.top) · [API Reference](https://pkg.go.dev/github.com/cocoyes/zhizhi-agent-runtime) · [Changelog](CHANGELOG.md)
 
-[Architecture and package boundaries](docs/architecture.md)
+Zhizhi (知枝) is a Go runtime for building AI Agents. Connect a model, register your business functions as tools, and let the Agent call them to complete tasks. For multi-step work, the runtime supports planning, parallel execution, conditional branches, and bounded recovery.
 
-Production-grade Go runtime for agents that plan, act, recover, and remain auditable.
+Use it inside a Go service, assistant, or automation application. You supply the model and business integrations; Zhizhi manages tool execution, budgets, approval checkpoints, and execution evidence.
 
-Version 1.0.7 adds a realtime duplex speech API, kept separate from ordinary
-LLM calls, plus a function-calling Doubao adapter. See
-[Doubao realtime speech](docs/doubao-realtime-speech.md).
+## What you can build
 
-Zhizhi is a model-agnostic execution layer for real applications. It turns ordinary Go functions into validated tools, builds dependency-safe plans, handles conditional branches and bounded replanning, and makes side effects explicit.
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=cocoyes%2Fzhizhi-agent-runtime&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=cocoyes/zhizhi-agent-runtime&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=cocoyes/zhizhi-agent-runtime&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=cocoyes/zhizhi-agent-runtime&type=date&legend=top-left" />
- </picture>
-</a>
-
-## What You Get
-
-- Typed tools with generated JSON schemas and runtime input/output validation
-- Chat, streaming, capability routing, and model-planned complex tasks
-- Dependency graphs, parallel batches, conditions, and evidence bindings
-- Bounded replanning after required-step failures
-- Retries, fallback, deadlines, budgets, and concurrency limits
-- Guards, confirmation gates, action receipts, and side-effect safety
-- MCP integration with allow-lists and trust-boundary controls
-- JSONL traces, evidence, warnings, and execution statistics
-
-The lifecycle is explicit:
-
-```text
-request -> route -> plan -> execute -> observe evidence -> replan -> answer
-```
-
-## Requirements
-
-- Go 1.25 or newer
-- An OpenAI-compatible Chat Completions endpoint
-
-The built-in adapter calls `{LLM_BASE_URL}/chat/completions`. It accepts standard
-Chat Completions responses and Responses-style text responses (`output_text` or
-`output[].content[].text`). Internal tool IDs may contain dots; they are normalized
-only on the provider wire format.
-
-Hybrid reasoning models such as DeepSeek and Doubao can be configured explicitly:
-
-```go
-model := openaicompat.New(openaicompat.Config{
-    BaseURL:         os.Getenv("LLM_BASE_URL"),
-    APIKey:          os.Getenv("LLM_API_KEY"),
-    Model:           os.Getenv("LLM_MODEL"),
-    Thinking:        openaicompat.ThinkingEnabled, // or ThinkingDisabled / ThinkingAuto
-    ReasoningEffort: "high",
-})
-```
-
-The adapter sends `thinking: {"type":"..."}` and, when explicitly configured, the top-level `reasoning_effort` field. When thinking mode is combined with tool calls, returned `reasoning_content` is automatically preserved in same-turn continuation requests. If omitted, `thinking` defaults to `ThinkingDisabled`, while `reasoning_effort` is not sent and remains under caller/provider control. Supported values still depend on the provider and model version. Example 10 also reads `LLM_THINKING` and `LLM_REASONING_EFFORT`.
-
-Enable detailed JSONL when diagnosing plans or tool arguments:
-
-```go
-zhizhi.WithObserver(observe.NewJSONL(os.Stdout, observe.WithDetails()))
-```
-
-Detailed mode records planner/replanner model requests, raw responses and repair attempts, actual per-step inputs/outputs/errors, the final patch, and final-composer requests/responses. It may contain user or business data, so it is disabled by default; example 10 enables it explicitly.
-
-The runtime no longer hand-parses structured model output: `jsonrepair-go` extracts and repairs non-standard JSON, `mapstructure/v2` handles common weak scalar drift, and `go-openapi/jsonpointer` resolves RFC 6901 evidence paths. Repaired syntax must still pass plan, JSON Schema, and patch-application validation before execution.
-
-The planner and replanner follow Eino's structured-output pattern on their primary path: derive JSON Schema from the Go result type, bind Plan or Patch as the only synthetic output tool, force `tool_choice`, and consume only that tool's arguments. Plain JSON text remains a compatibility path for models that do not advertise tool calling; domain tools are catalog metadata and cannot execute during planning.
+- **Conversational assistants:** chat, streaming, multimodal inputs, and typed function calling.
+- **Task automation:** ReAct tool loops and Plan-and-Execute workflows with dependencies and recovery.
+- **Connected agents:** integrate MCP servers and discover local Skills on demand.
+- **Document workflows:** run approved Skill Python scripts in disposable Docker containers.
+- **Auditable services:** apply guards and confirmations, resume suspended work, and inspect traces and action receipts.
+- **Voice applications:** use the independent realtime speech API and Doubao adapter.
 
 ## Install
 
+Requires **Go 1.25+** and a model endpoint. The built-in adapter supports OpenAI-compatible Chat Completions; you can also implement the `model.Model` interface for another provider. Tool workflows require a model that supports tool calling. Docker is optional and needed only for Skill script execution.
+
 ```bash
-go get github.com/cocoyes/zhizhi-agent-runtime
+go get github.com/cocoyes/zhizhi-agent-runtime@v1.1.1
 ```
 
 ## Quickstart
@@ -117,7 +57,7 @@ func main() {
     defer agent.Close(context.Background())
 
     response, err := agent.Run(context.Background(), zhizhi.Request{
-        Input: "Summarize the latest support request",
+        Input: "Explain what an AI Agent can do in three sentences",
     })
     if err != nil { log.Fatal(err) }
     fmt.Println(response.Text)
@@ -131,54 +71,11 @@ export LLM_MODEL="your-model"
 go run ./examples/00-chat
 ```
 
-The endpoint can return a standard Chat Completions response:
+Save the Go code as `main.go` in your own module and run `go run .` with those environment variables. To use the repository examples, clone this repository and run the example command from its root. Set `LLM_BASE_URL` to the API base URL, such as `https://your-provider.example/v1`; the adapter appends `/chat/completions`.
 
-```json
-{"choices":[{"message":{"role":"assistant","content":"..."}}]}
-```
+The following snippets extend the quickstart and assume `model` is configured and `ctx` is a request context. Add the indicated package imports and handle initialization errors before using an Agent. Always close Agents and streams when finished.
 
-Responses-style text is also accepted:
-
-```json
-{"output_text":"..."}
-```
-
-## P0 execution contract
-
-Messages support ordered text and image parts through `model.UserMessage`,
-`model.TextPart`, and `model.ImageURLPart`. Model inputs support `auto`, `none`,
-`required`, and named tool choice plus `text`, `json_object`, and strict
-`json_schema` response formats. Adapters declare their capabilities and reject
-unsupported content instead of silently dropping it.
-
-Each run can add or filter an immutable tool snapshot and attach scoped options:
-
-```go
-response, err := agent.Run(ctx, request,
-    zhizhi.WithRunTools(requestTools...),
-    zhizhi.WithRunToolFilter(allowForRequest),
-    zhizhi.WithRunObserver(requestObserver),
-    zhizhi.WithRunMetadata(metadata),
-    zhizhi.WithRunResponseFormat(format),
-)
-```
-
-Global and run-scoped middleware are available for agent, model, model stream,
-tool, tool stream, planner, and replanner boundaries. `Stream` emits stable
-run/model/tool/plan/step lifecycle events across every tool round and complex
-mode. Complex plans may use deterministic tool steps or bounded agentic steps
-with an explicit capability allowlist and tool-call budget. Final and suspended
-responses contain cumulative model/tool usage and execution statistics.
-Optional OpenTelemetry integration lives in `adapter/otel`; its instrumentation
-provides middleware for each execution boundary plus an event observer, keeping
-the core runtime independent of OTel APIs.
-
-For local setup, copy `.env.example` to your shell environment and set a real
-provider endpoint, API key, and model. The runtime never fabricates model
-responses: planning, tool selection, replanning, and final composition all use
-the configured model.
-
-## Typed Tools
+## Register a Go function as a tool
 
 Tools are normal typed Go functions. Schemas are reflected automatically and arguments/results are validated at runtime.
 
@@ -205,9 +102,25 @@ agent, err := zhizhi.New(zhizhi.WithModel(model), zhizhi.WithTools(weather))
 
 Tool descriptions are part of the model interface. Describe what a tool does and when it should be used. Keep IDs stable and specific; the runtime resolves the selected capability to the registered implementation.
 
-## Complex Agent Tasks
+The weather data above is illustrative. Replace the function body with your own API or service call. Import `github.com/cocoyes/zhizhi-agent-runtime/tool`, then ask the Agent about a city's weather. See [the complete tool example](examples/02-function-tool/main.go).
 
-For multi-step work, ask the runtime to use complex mode. The built-in model planner chooses tools and builds the dependency graph.
+## Stream a response
+
+```go
+stream, err := agent.Stream(ctx, zhizhi.Request{Input: "Tell me a short story"})
+if err != nil { return err }
+defer stream.Close()
+for {
+    event, err := stream.Recv(ctx)
+    if errors.Is(err, io.EOF) { break }
+    if err != nil { return err }
+    fmt.Print(event.TextDelta)
+}
+```
+
+Import `errors` and `io` for the receive loop. The stream also exposes tool and execution lifecycle events; see [the streaming example](examples/01-stream/main.go).
+
+## Run a multi-step task
 
 ```go
 ctx := context.Background()
@@ -218,83 +131,94 @@ response, err := agent.Run(ctx, zhizhi.Request{
 })
 ```
 
-Here `context.Background()` can be replaced with a request-scoped context carrying
-your deadline and cancellation policy.
+Register the tools needed for the task first. Complex mode builds a dependency graph, passes results between steps, runs independent steps in parallel, and can replan within the configured budget when a required step fails. See [the complete Agent example](examples/10-full-agent) and [the household workflow](examples/11-household-workflow).
 
-A planner can express result-based branches:
-
-```json
-{
-  "version": 1,
-  "steps": [
-    {"id":"weather", "capability":"weather.current", "input":{"city":"Shenzhen"}},
-    {"id":"outdoor", "capability":"activity.outdoor", "depends_on":["weather"], "condition":{"source_step":"weather","source_path":"outdoor_suitable","equals":true}, "bindings":[{"source_step":"weather","source_path":"temperature","target_path":"temperature"}]},
-    {"id":"indoor", "capability":"activity.indoor", "depends_on":["weather"], "condition":{"source_step":"weather","source_path":"outdoor_suitable","equals":false}},
-    {"id":"compose", "capability":"itinerary.compose", "depends_on":["outdoor","indoor"]}
-  ]
-}
-```
-
-The condition source must be a dependency. A non-matching step is skipped and never calls its tool. Bindings pass evidence into the next typed input. If a required step fails, one bounded replan can replace that step while preserving successful work.
-
-The complete workflow is runnable and tested:
-
-```bash
-go run ./examples/10-full-agent
-go test ./examples/10-full-agent
-```
-
-## Side-Effect Safety
-
-Declare risk and authorization requirements for writes:
+## Connect an MCP server
 
 ```go
-sendEmail := tool.Func(
-    "mail.send", "Send an email to a recipient", sendEmailImpl,
-    tool.WithCapabilities("mail.send"),
-    tool.WithSideEffect(tool.SideEffectWriteNonIdempotent),
-    tool.WithIdempotency(tool.IdempotencyNonIdempotent),
-    tool.WithRisk(tool.RiskHigh),
-    tool.WithConfirmation(tool.ConfirmationAlways),
-)
-agent, err := zhizhi.New(
-    zhizhi.WithModel(model), zhizhi.WithTools(sendEmail),
-    zhizhi.WithGuard(authorize),
-    zhizhi.WithConfirmation(askUser),
-)
-```
-
-Without confirmation, the side effect is not executed. The response contains an `ActionReceipt` with `CONFIRMATION_REQUIRED`. Unknown external outcomes are represented explicitly and must not be treated as success.
-
-### Suspend and resume
-
-Every agent has a process-local checkpoint store by default. Inject a durable
-store in production and resume the exact suspended state after approval:
-
-```go
+// import runtimemcp "github.com/cocoyes/zhizhi-agent-runtime/mcp"
 agent, err := zhizhi.New(
     zhizhi.WithModel(model),
-    zhizhi.WithTools(sendEmail),
-    zhizhi.WithCheckpointStore(durableStore),
+    zhizhi.WithMCP(runtimemcp.Config{
+        ID: "internal-tools",
+        Transport: runtimemcp.TransportStreamableHTTP,
+        Endpoint: "https://tools.example.com/mcp",
+        AllowTools: []string{"customer.lookup", "ticket.search"},
+    }),
 )
-
-pending, err := agent.Run(ctx, request)
-if pending.Suspended {
-    completed, err := agent.Resume(ctx, zhizhi.ResumeRequest{
-        RunID: pending.RunID, Checkpoint: pending.Checkpoint, Decision: true,
-    }, runOptions...) // provide the same request-scoped tools, if any
-    _ = completed
-    _ = err
-}
 ```
 
-Checkpoints are versioned and bound to the tool-catalog fingerprint. Completed
-steps and successful write receipts are replayed without executing their tools;
-`UNKNOWN` receipts are never retried. A resumed checkpoint is invalidated even
-when execution suspends again, preventing stale approval tokens from replaying a
-write.
+MCP connections are lazy by default. Use allowlists to control which remote tools are available. For multiple servers, `mcp.NewCapabilityProvider` with `zhizhi.WithMCPCapabilityProvider` lets the model select a server before its tool list is loaded. See [the MCP client example](examples/06-mcp-client/README.md).
 
-## Reliability Controls
+## Load local Skills on demand
+
+A Skill is a directory containing a `SKILL.md` with `name` and `description` frontmatter and usage instructions:
+
+```text
+skills/
+└── greeting/
+    └── SKILL.md
+```
+
+```markdown
+---
+name: greeting
+description: Compose a short greeting for a named person.
+---
+Ask for the person's name if it is missing, then write a friendly greeting.
+```
+
+```go
+// import "github.com/cocoyes/zhizhi-agent-runtime/skill"
+catalog := skill.NewCatalog(skill.CatalogOptions{})
+if _, err := catalog.LoadRoot(ctx, "./skills"); err != nil {
+    return err
+}
+agent, err := zhizhi.New(
+    zhizhi.WithModel(model),
+    zhizhi.WithSkillProvider(catalog, zhizhi.SkillOptions{}),
+)
+```
+
+`LoadRoot` indexes names, descriptions, and directories in memory. Calling it again atomically refreshes that root; a failed scan preserves the previous index. The model sees `skills.search` and `skills.invoke`, discovers candidates, and loads instructions only after selection. The full Skill library is not included in every request.
+
+To let a Skill call business tools, register them with `WithTools` and list their IDs in `SkillOptions.AllowedTools`. An empty list grants no business tools. See [the Skill guide](docs/runtime-skills.md) and [the offline example](examples/14-skills).
+
+### Execute approved Python scripts with Docker
+
+Install Docker Engine, load your Skill catalog, and explicitly approve its script entrypoints. The example below assumes the catalog includes `test-skill` with `scripts/hello.py`:
+
+```go
+// import "github.com/cocoyes/zhizhi-agent-runtime/skill/script"
+// import dockerscript "github.com/cocoyes/zhizhi-agent-runtime/skill/script/docker"
+executor, err := dockerscript.New(ctx, dockerscript.Config{
+    Enabled: true,
+    Catalog: catalog,
+    Image: "python:3.12-slim",
+    AutoPull: true,
+    Registrations: []script.Registration{{
+        SkillID: "test-skill",
+        Scripts: []script.EntryPoint{{Path: "scripts/hello.py"}},
+    }},
+})
+if err != nil { return err }
+defer executor.Close(context.Background())
+
+agent, err := zhizhi.New(
+    zhizhi.WithModel(model),
+    zhizhi.WithSkillProvider(catalog, zhizhi.SkillOptions{
+        ScriptExecutor: executor,
+    }),
+)
+```
+
+Only the selected Skill receives `run_skill_script`. Each call uses a separate temporary container; images are reused, containers are removed, and task outputs can be read through the executor. You do not need host Python or a manually created container. With `AutoPull: true`, the first run downloads a missing image.
+
+Defaults include non-root execution, read-only Skill files, disabled networking, and CPU, memory, time, and output limits. This feature is intended for audited Skills. Docker API access is highly privileged; protect the process using it. See [configuration and security boundaries](docs/docker-skill-scripts.md), [the runnable example](examples/15-docker-skills/README.md), and [the dependency image Dockerfile](examples/15-docker-skills/Dockerfile).
+
+## Control execution and inspect results
+
+Pass a deadline or cancellation through `context.Context`, and configure per-Agent limits with `WithBudget`:
 
 ```go
 zhizhi.WithBudget(zhizhi.Budget{
@@ -304,91 +228,36 @@ zhizhi.WithBudget(zhizhi.Budget{
 })
 ```
 
-The default policy retries only transient, safe, idempotent failures. Writes are never silently repeated.
-
-## MCP
+Declare side effects with `tool.WithSideEffect`, `tool.WithIdempotency`, and `tool.WithConfirmation`. Use `WithGuard` for authorization and `WithConfirmation` for the approval decision. When execution suspends, resume its checkpoint after approval:
 
 ```go
-import runtimemcp "github.com/cocoyes/zhizhi-agent-runtime/mcp"
-
 agent, err := zhizhi.New(
     zhizhi.WithModel(model),
-    zhizhi.WithMCP(runtimemcp.Config{
-        ID: "internal-tools", Transport: runtimemcp.TransportStreamableHTTP,
-        Endpoint: "https://tools.example.com/mcp",
-        ConnectionStrategy: runtimemcp.ConnectionLazy,
-        Required: false,
-		MaxConnectAttempts: 3,
-		ReconnectBackoff: 200 * time.Millisecond,
-        AllowTools: []string{"customer.lookup", "ticket.search"},
-        DenyTools: []string{"admin.delete"},
-    }),
+    zhizhi.WithTools(sendEmail),
+    zhizhi.WithCheckpointStore(durableStore),
 )
-```
 
-Lazy connection is the default. Concurrent first use is single-flight; optional
-servers are isolated from agent creation, while `Required` servers fail the run
-if unavailable. Providers support catalog refresh, fingerprint/version drift,
-bounded reconnect backoff, cancellation, and context-bounded close. MCP tools
-are treated as an untrusted boundary. See [SECURITY.md](SECURITY.md).
-
-For a large MCP fleet, use a capability provider so the model first sees only
-server names and descriptions. The runtime connects and calls `ListTools` only
-for the selected server or servers (one request may select several):
-
-```go
-capabilities, err := runtimemcp.NewCapabilityProvider(
-    runtimemcp.Config{ID: "maps", Description: "Maps, weather, and routing", Endpoint: mapsURL},
-    runtimemcp.Config{ID: "knowledge", Description: "Encyclopedia search", Endpoint: knowledgeURL},
-)
-agent, err := zhizhi.New(
-    zhizhi.WithModel(model),
-    zhizhi.WithMCPCapabilityProvider(capabilities),
-)
-```
-
-## Local Skills
-
-Load metadata once, then let the model discover and select workflows on demand:
-
-```go
-catalog := skill.NewCatalog(skill.CatalogOptions{})
-report, err := catalog.LoadRoot(ctx, "/srv/skills")
 if err != nil { return err }
-_ = report
-agent, err := zhizhi.New(
-    zhizhi.WithModel(model),
-    zhizhi.WithTools(documentRead),
-    zhizhi.WithSkillProvider(catalog, zhizhi.SkillOptions{
-        AllowedTools: []string{"documents.read"},
-    }),
-)
+defer agent.Close(context.Background())
+
+pending, err := agent.Run(ctx, request)
+if err != nil { return err }
+if pending.Suspended {
+    completed, err := agent.Resume(ctx, zhizhi.ResumeRequest{
+        RunID: pending.RunID, Checkpoint: pending.Checkpoint, Decision: true,
+    }) // Pass the same run options here if the original request used them.
+    if err != nil { return err }
+    fmt.Println(completed.Text)
+}
 ```
 
-Import `github.com/cocoyes/zhizhi-agent-runtime/skill`. Calling `LoadRoot` again
-atomically reloads that root; parse failures preserve the previous snapshot.
-The model receives only `skills.search` and `skills.invoke`, never the complete
-Skill catalog. A search returns at most ten candidates; invocation loads only
-the selected instructions and runs them with the configured tool permissions.
-Empty `AllowedTools` grants no business tools. Nested confirmations suspend and
-resume without replaying completed actions. See [the Skill contract](docs/runtime-skills.md)
-and the [offline example](examples/14-skills).
+The snippet assumes a registered `sendEmail` tool, a checkpoint store, and your request variables. Provide the same request-scoped tools when resuming. Use a durable checkpoint store for recovery across process restarts.
 
-## Observability
-
-```go
-import (
-    "os"
-    "github.com/cocoyes/zhizhi-agent-runtime/observe"
-)
-
-observer := observe.NewJSONL(os.Stdout)
-agent, err := zhizhi.New(zhizhi.WithModel(model), zhizhi.WithObserver(observer))
-```
-
-Responses expose `Evidence`, `Actions`, `Warnings`, and statistics for model calls, tool calls, plan steps, batches, and replans.
+Responses include `Text`, `Evidence`, `Actions`, `Warnings`, and execution statistics. Add `zhizhi.WithObserver(observe.NewJSONL(os.Stdout))` to record events, or use `adapter/otel` for OpenTelemetry integration. Detailed JSONL is opt-in and may include business data.
 
 ## Examples
+
+Most model-backed examples read `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`; see [.env.example](.env.example). Example 14 runs offline, while example 15 uses a deterministic model and a real Docker Engine.
 
 | Example | Purpose | Command |
 | --- | --- | --- |
@@ -404,22 +273,20 @@ Responses expose `Evidence`, `Actions`, `Warnings`, and statistics for model cal
 | `09-config-agent` | YAML configuration | `go run ./examples/09-config-agent` |
 | `10-full-agent` | Conditions, bindings, replan, composition | `go run ./examples/10-full-agent` |
 | `11-household-workflow` | Real-model parallel steps, conditional bindings, and failure replanning | `go run ./examples/11-household-workflow` |
+| `12-doubao-realtime` | Realtime duplex speech | [README](examples/12-doubao-realtime/README.md) |
 | `13-parallel-search` | Opt-in keyless web research via Parallel Search MCP | `go run ./examples/13-parallel-search` |
 | `14-skills` | Offline Skill discovery and bounded execution | `go run ./examples/14-skills` |
+| `15-docker-skills` | Approved Python scripts in disposable Docker containers | `go run ./examples/15-docker-skills` |
 
-## Development
+## Further reading
 
-```bash
-go fmt ./...
-go vet ./...
-go test ./...
-go test -race ./...
-go build ./...
-```
+- [Architecture and extension points](docs/architecture.md)
+- [Skill loading and execution](docs/runtime-skills.md)
+- [Docker script configuration and security](docs/docker-skill-scripts.md)
+- [Realtime speech](docs/doubao-realtime-speech.md)
+- [Runtime compatibility and migration](docs/runtime-stability.md)
+- [Release history](CHANGELOG.md)
 
-`make verify` runs the standard local checks. Real-provider tests are opt-in; the default suite is offline and deterministic.
+## Security and license
 
-
-## Security and License
-
-Report vulnerabilities privately with the affected version, a minimal reproduction, and impact. See [SECURITY.md](SECURITY.md). See [LICENSE](LICENSE) for licensing terms.
+Report vulnerabilities privately following [SECURITY.md](SECURITY.md). This project is released under the [MIT License](LICENSE).

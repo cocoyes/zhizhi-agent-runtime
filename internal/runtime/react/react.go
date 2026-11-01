@@ -191,6 +191,9 @@ func (r Runner) RunInput(ctx context.Context, input model.ModelInput) (Result, e
 				return result, errors.New("react: external effect is unknown; automatic execution is blocked")
 			}
 			if err != nil {
+				if invoked.Content != nil {
+					result.Evidence = append(result.Evidence, contract.Evidence{ToolID: value.Spec().ID, ProviderID: value.Spec().ProviderID, Data: invoked.Content, Content: invoked.Content, SchemaValid: true, CapturedAt: time.Now().UTC()})
+				}
 				if (value.Spec().IsWrite() || value.Spec().SideEffect == tool.SideEffectUnknown) && invoked.Action == nil && !errors.Is(err, requestbudget.Exceeded) {
 					now := time.Now().UTC()
 					result.Actions = append(result.Actions, contract.ActionReceipt{ToolID: value.Spec().ID, Status: contract.ActionUnknown, ExecutedAt: now, Timestamp: now, Message: "write outcome is unknown; automatic replay is blocked"})
