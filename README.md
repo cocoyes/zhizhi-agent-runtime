@@ -347,6 +347,33 @@ agent, err := zhizhi.New(
 )
 ```
 
+## Local Skills
+
+Load metadata once, then let the model discover and select workflows on demand:
+
+```go
+catalog := skill.NewCatalog(skill.CatalogOptions{})
+report, err := catalog.LoadRoot(ctx, "/srv/skills")
+if err != nil { return err }
+_ = report
+agent, err := zhizhi.New(
+    zhizhi.WithModel(model),
+    zhizhi.WithTools(documentRead),
+    zhizhi.WithSkillProvider(catalog, zhizhi.SkillOptions{
+        AllowedTools: []string{"documents.read"},
+    }),
+)
+```
+
+Import `github.com/cocoyes/zhizhi-agent-runtime/skill`. Calling `LoadRoot` again
+atomically reloads that root; parse failures preserve the previous snapshot.
+The model receives only `skills.search` and `skills.invoke`, never the complete
+Skill catalog. A search returns at most ten candidates; invocation loads only
+the selected instructions and runs them with the configured tool permissions.
+Empty `AllowedTools` grants no business tools. Nested confirmations suspend and
+resume without replaying completed actions. See [the Skill contract](docs/runtime-skills.md)
+and the [offline example](examples/14-skills).
+
 ## Observability
 
 ```go
@@ -378,6 +405,7 @@ Responses expose `Evidence`, `Actions`, `Warnings`, and statistics for model cal
 | `10-full-agent` | Conditions, bindings, replan, composition | `go run ./examples/10-full-agent` |
 | `11-household-workflow` | Real-model parallel steps, conditional bindings, and failure replanning | `go run ./examples/11-household-workflow` |
 | `13-parallel-search` | Opt-in keyless web research via Parallel Search MCP | `go run ./examples/13-parallel-search` |
+| `14-skills` | Offline Skill discovery and bounded execution | `go run ./examples/14-skills` |
 
 ## Development
 

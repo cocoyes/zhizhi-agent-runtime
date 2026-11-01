@@ -17,6 +17,7 @@ import (
 )
 
 type StepResult struct {
+	Composite           *tool.CompositeResult
 	Continuation        *react.Continuation
 	StepID              string
 	RequestedCapability string
@@ -40,6 +41,7 @@ type StepResult struct {
 
 type InputResolver func(Step) json.RawMessage
 type AgenticResult struct {
+	Composite        *tool.CompositeResult
 	Continuation     *react.Continuation
 	Content          any
 	Action           *tool.ActionReceipt
@@ -193,6 +195,7 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 					}
 					out, runErr := s.Agentic(ctx, current, payload)
 					result.Content, result.Action, result.Err = out.Content, out.Action, runErr
+					result.Composite = out.Composite
 					result.Continuation = out.Continuation
 					if result.Action != nil {
 						result.ToolID = result.Action.ToolID
@@ -313,6 +316,7 @@ func (s Scheduler) Run(ctx context.Context, execution ExecutionPlan, resolve Inp
 				}
 				out, err := runner.Execute(ctx, candidates, payload)
 				result.ToolID, result.Content, result.Receipt, result.Action, result.Err = out.ToolID, out.Value.Content, out.Value.Receipt, out.Value.Action, err
+				result.Composite = out.Value.Composite
 				if pendingAction != nil {
 					result.Action = pendingAction
 				}

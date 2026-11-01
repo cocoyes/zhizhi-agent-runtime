@@ -25,7 +25,9 @@ const (
 	SideEffectWriteNonIdempotent SideEffectClass = "write_non_idempotent"
 	SideEffectDestructive        SideEffectClass = "destructive"
 	SideEffectUnknown            SideEffectClass = "unknown"
-	SideEffectWrite              SideEffectClass = SideEffectWriteNonIdempotent // compatibility alias
+	// SideEffectDelegated reports effects through CompositeResult, never retries.
+	SideEffectDelegated SideEffectClass = "delegated"
+	SideEffectWrite     SideEffectClass = SideEffectWriteNonIdempotent // compatibility alias
 )
 
 type Idempotency string
@@ -79,9 +81,10 @@ type Spec struct {
 }
 
 type Result struct {
-	Content any
-	Receipt bool
-	Action  *ActionReceipt
+	Content   any
+	Receipt   bool
+	Action    *ActionReceipt
+	Composite *CompositeResult
 }
 
 type ActionReceipt = contract.ActionReceipt

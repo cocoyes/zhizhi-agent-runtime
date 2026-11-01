@@ -277,6 +277,30 @@ Agent 创建，`Required` 服务不可用时则明确失败。Provider 支持目
 版本/指纹、重连退避、取消和有界关闭。MCP 工具属于不可信边界，详见
 [SECURITY.md](SECURITY.md)。响应提供 `Evidence`、`Actions`、`Warnings` 和完整运行统计。
 
+## 按需加载本地 Skill
+
+```go
+// import "github.com/cocoyes/zhizhi-agent-runtime/skill"
+catalog := skill.NewCatalog(skill.CatalogOptions{})
+report, err := catalog.LoadRoot(ctx, "/srv/skills")
+if err != nil { return err }
+_ = report
+agent, err := zhizhi.New(
+    zhizhi.WithModel(model),
+    zhizhi.WithTools(documentRead),
+    zhizhi.WithSkillProvider(catalog, zhizhi.SkillOptions{
+        AllowedTools: []string{"documents.read"},
+    }),
+)
+```
+
+重复调用 `LoadRoot` 会原子替换该根目录的索引；扫描或解析失败时保留旧快照。
+内存保存所有 Skill 的名称、描述和目录，模型仅看到固定的 `skills.search`、
+`skills.invoke`。搜索默认返回 5 个候选、最多 10 个，选定后才读取正文并执行。
+`AllowedTools` 为空表示不授予业务工具；内部调用沿用请求预算和确认策略，
+暂停恢复不重放已完成动作。详见 [Skill 契约](docs/runtime-skills.md) 和
+[离线示例](examples/14-skills)。
+
 ## 示例目录
 
 | 示例 | 内容 | 命令 |
@@ -294,6 +318,7 @@ Agent 创建，`Required` 服务不可用时则明确失败。Provider 支持目
 | `10-full-agent` | 条件、绑定、replan 和组合 | `go run ./examples/10-full-agent` |
 | `11-household-workflow` | 真实模型驱动的并行、条件绑定与故障重规划 | `go run ./examples/11-household-workflow` |
 | `13-parallel-search` | 通过 Parallel Search MCP 进行无需密钥的可选网页研究 | `go run ./examples/13-parallel-search` |
+| `14-skills` | 离线 Skill 发现、按需加载和受限执行 | `go run ./examples/14-skills` |
 
 ## 开发与验证
 

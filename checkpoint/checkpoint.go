@@ -66,8 +66,10 @@ type Checkpoint struct {
 	Limits             BudgetLimits             `json:"limits"`
 	Deadline           time.Time                `json:"deadline,omitempty"`
 	State              json.RawMessage          `json:"state,omitempty"`
-	CreatedAt          time.Time                `json:"created_at"`
-	UpdatedAt          time.Time                `json:"updated_at"`
+	// SkillState retains run-scoped grants and nested invocation continuations.
+	SkillState json.RawMessage `json:"skill_state,omitempty"`
+	CreatedAt  time.Time       `json:"created_at"`
+	UpdatedAt  time.Time       `json:"updated_at"`
 }
 
 func (c Checkpoint) Validate() error {

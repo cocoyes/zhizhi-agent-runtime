@@ -29,6 +29,7 @@ type RunToolFilter func(tool.Spec) bool
 type RunOption func(*runConfig) error
 
 type runConfig struct {
+	skills                *skillScope
 	tools                 []tool.Tool
 	filter                RunToolFilter
 	observer              observe.Observer
@@ -146,6 +147,14 @@ func (r *runtime) newRunConfig(options []RunOption) (runConfig, *tool.Registry, 
 	cfg.model = middleware.WrapModel(cfg.counter,
 		append(append([]middleware.ModelMiddleware(nil), r.cfg.modelMiddleware...), cfg.modelMiddleware...),
 		append(append([]middleware.ModelStreamMiddleware(nil), r.cfg.modelStreamMiddleware...), cfg.modelStreamMiddleware...))
+	if r.cfg.skillConfig != nil {
+		cfg.skills = newSkillScope(r, &cfg)
+		registry, err := r.addSkillTools(cfg, registry)
+		if err != nil {
+			return runConfig{}, nil, err
+		}
+		return cfg, registry, nil
+	}
 	return cfg, registry, nil
 }
 
@@ -170,6 +179,9 @@ func (r *runtime) addSelectedTools(cfg runConfig, registry *tool.Registry, selec
 	registry = tool.NewRegistry(values...)
 	if err := registry.Validate(); err != nil {
 		return nil, fmt.Errorf("run tools: %w", err)
+	}
+	if cfg.skills != nil {
+		cfg.skills.registry = registry
 	}
 	return registry, nil
 }

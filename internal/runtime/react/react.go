@@ -169,11 +169,21 @@ func (r Runner) RunInput(ctx context.Context, input model.ModelInput) (Result, e
 			}
 			invoked, err := tool.CallAndCollect(ctx, value, json.RawMessage(call.Function.Arguments), nil)
 			result.ToolCalls++
+			if tool.CollectComposite(invoked, &result.Evidence, &result.Actions) {
+				// The outer call remains pending; the composite owns the inner
+				// continuation and is resumed rather than started over.
+				result.Actions = append(result.Actions, *invoked.Action)
+				prior := result
+				prior.Continuation = nil
+				result.PendingArguments = append(json.RawMessage(nil), call.Function.Arguments...)
+				result.Continuation = &Continuation{Input: input, PendingCalls: append([]model.ToolCallRequest(nil), pending[callIndex:]...), Result: prior}
+				return result, errors.New("react: confirmation required")
+			}
 			if value.Spec().SideEffect == tool.SideEffectUnknown && invoked.Action == nil && !errors.Is(err, requestbudget.Exceeded) {
 				now := time.Now().UTC()
 				invoked.Action = &contract.ActionReceipt{ToolID: value.Spec().ID, Status: contract.ActionUnknown, ExecutedAt: now, Timestamp: now, Message: "external effect is unknown; automatic execution is blocked"}
 			}
-			if invoked.Action != nil {
+			if invoked.Action != nil && invoked.Composite == nil {
 				result.Actions = append(result.Actions, *invoked.Action)
 			}
 			if err == nil && invoked.Action != nil && invoked.Action.Status == contract.ActionUnknown {

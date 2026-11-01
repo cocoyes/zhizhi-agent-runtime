@@ -136,6 +136,7 @@ type config struct {
 	replanner              plan.Replanner
 	mcpConfigs             []runtimemcp.Config
 	mcpCapabilityProviders []*runtimemcp.CapabilityProvider
+	skillConfig            *skillConfig
 	observer               observe.Observer
 	budget                 Budget
 	plannerRecovery        PlannerRecoveryPolicy
@@ -354,29 +355,30 @@ type complexResumeState struct {
 }
 
 type checkpointStepResult struct {
-	StepID              string              `json:"step_id"`
-	RequestedCapability string              `json:"requested_capability,omitempty"`
-	Capability          string              `json:"capability"`
-	ToolID              string              `json:"tool_id"`
-	Content             any                 `json:"content,omitempty"`
-	Receipt             bool                `json:"receipt,omitempty"`
-	Action              *tool.ActionReceipt `json:"action,omitempty"`
-	Duration            time.Duration       `json:"duration,omitempty"`
-	Attempts            int                 `json:"attempts,omitempty"`
-	Fallbacks           int                 `json:"fallbacks,omitempty"`
-	Skipped             bool                `json:"skipped,omitempty"`
-	ConditionUnknown    bool                `json:"condition_unknown,omitempty"`
-	Input               json.RawMessage     `json:"input,omitempty"`
-	Continuation        *react.Continuation `json:"continuation,omitempty"`
+	Composite           *tool.CompositeResult `json:"composite,omitempty"`
+	StepID              string                `json:"step_id"`
+	RequestedCapability string                `json:"requested_capability,omitempty"`
+	Capability          string                `json:"capability"`
+	ToolID              string                `json:"tool_id"`
+	Content             any                   `json:"content,omitempty"`
+	Receipt             bool                  `json:"receipt,omitempty"`
+	Action              *tool.ActionReceipt   `json:"action,omitempty"`
+	Duration            time.Duration         `json:"duration,omitempty"`
+	Attempts            int                   `json:"attempts,omitempty"`
+	Fallbacks           int                   `json:"fallbacks,omitempty"`
+	Skipped             bool                  `json:"skipped,omitempty"`
+	ConditionUnknown    bool                  `json:"condition_unknown,omitempty"`
+	Input               json.RawMessage       `json:"input,omitempty"`
+	Continuation        *react.Continuation   `json:"continuation,omitempty"`
 }
 
 func persistStepResults(values []exec.StepResult, pendingStep string) []checkpointStepResult {
 	out := make([]checkpointStepResult, 0, len(values))
 	for _, value := range values {
-		if (value.StepID == pendingStep || value.Err != nil) && value.Continuation == nil {
+		if (value.StepID == pendingStep || value.Err != nil) && value.Continuation == nil && value.Composite == nil {
 			continue
 		}
-		out = append(out, checkpointStepResult{StepID: value.StepID, RequestedCapability: value.RequestedCapability, Capability: value.Capability, ToolID: value.ToolID, Content: value.Content, Receipt: value.Receipt, Action: value.Action, Duration: value.Duration, Attempts: value.Attempts, Fallbacks: value.Fallbacks, Skipped: value.Skipped, ConditionUnknown: value.ConditionUnknown, Input: append(json.RawMessage(nil), value.Input...), Continuation: value.Continuation})
+		out = append(out, checkpointStepResult{Composite: value.Composite, StepID: value.StepID, RequestedCapability: value.RequestedCapability, Capability: value.Capability, ToolID: value.ToolID, Content: value.Content, Receipt: value.Receipt, Action: value.Action, Duration: value.Duration, Attempts: value.Attempts, Fallbacks: value.Fallbacks, Skipped: value.Skipped, ConditionUnknown: value.ConditionUnknown, Input: append(json.RawMessage(nil), value.Input...), Continuation: value.Continuation})
 	}
 	return out
 }
@@ -384,16 +386,17 @@ func persistStepResults(values []exec.StepResult, pendingStep string) []checkpoi
 func restoreStepResults(values []checkpointStepResult) map[string]exec.StepResult {
 	out := make(map[string]exec.StepResult, len(values))
 	for _, value := range values {
-		if value.Continuation != nil {
+		if value.Continuation != nil || (value.Composite != nil && value.Composite.Pending != nil) {
 			continue
 		}
-		out[value.StepID] = exec.StepResult{StepID: value.StepID, RequestedCapability: value.RequestedCapability, Capability: value.Capability, ToolID: value.ToolID, Content: value.Content, Receipt: value.Receipt, Action: value.Action, Duration: value.Duration, Attempts: value.Attempts, Fallbacks: value.Fallbacks, Skipped: value.Skipped, ConditionUnknown: value.ConditionUnknown, Input: append(json.RawMessage(nil), value.Input...)}
+		out[value.StepID] = exec.StepResult{Composite: value.Composite, StepID: value.StepID, RequestedCapability: value.RequestedCapability, Capability: value.Capability, ToolID: value.ToolID, Content: value.Content, Receipt: value.Receipt, Action: value.Action, Duration: value.Duration, Attempts: value.Attempts, Fallbacks: value.Fallbacks, Skipped: value.Skipped, ConditionUnknown: value.ConditionUnknown, Input: append(json.RawMessage(nil), value.Input...)}
 	}
 	return out
 }
 
 func (r *runtime) saveCheckpoint(ctx context.Context, registry *tool.Registry, runID string, state simpleResumeState, pending model.ToolCallRequest) (string, error) {
 	state.Kind = "simple"
+	state.Usage = skillUsage(ctx, state.Usage)
 	if ledger := budget.FromContext(ctx); ledger != nil {
 		used := ledger.Snapshot()
 		state.ModelCalls, state.ToolCalls = used.ModelCalls, used.ToolCalls
@@ -408,6 +411,10 @@ func (r *runtime) saveCheckpoint(ctx context.Context, registry *tool.Registry, r
 	}
 	now := time.Now().UTC()
 	value := checkpoint.Checkpoint{Version: checkpoint.CurrentVersion, ID: id, RunID: runID, Reason: checkpoint.ReasonConfirmation, CatalogFingerprint: catalogFingerprint(registry), Messages: state.Input.Messages, Evidence: state.Evidence, Actions: state.Actions, Pending: &checkpoint.PendingInvocation{CallID: pending.ID, ToolID: pending.Function.Name, Arguments: json.RawMessage(pending.Function.Arguments)}, Budget: checkpoint.BudgetUsage{ModelCalls: state.ModelCalls, ToolCalls: state.ToolCalls}, State: encoded, CreatedAt: now, UpdatedAt: now}
+	value.SkillState, err = saveSkillScope(ctx)
+	if err != nil {
+		return "", err
+	}
 	value.Deadline, _ = ctx.Deadline()
 	if ledger := budget.FromContext(ctx); ledger != nil {
 		limits := ledger.Limits()
@@ -437,6 +444,10 @@ func (r *runtime) saveComplexCheckpoint(ctx context.Context, registry *tool.Regi
 	now := time.Now().UTC()
 	arguments := append(json.RawMessage(nil), pending.Input...)
 	value := checkpoint.Checkpoint{Version: checkpoint.CurrentVersion, ID: id, RunID: runID, Reason: checkpoint.ReasonConfirmation, CatalogFingerprint: catalogFingerprint(registry), Actions: collectCheckpointActions(state.Completed), Pending: &checkpoint.PendingInvocation{ToolID: pending.ToolID, StepID: pending.StepID, Arguments: arguments}, State: encoded, CreatedAt: now, UpdatedAt: now}
+	value.SkillState, err = saveSkillScope(ctx)
+	if err != nil {
+		return "", err
+	}
 	value.Budget = checkpoint.BudgetUsage{ModelCalls: state.ModelCalls, ToolCalls: state.ToolCalls, Replans: state.Replans}
 	value.Deadline, _ = ctx.Deadline()
 	if ledger := budget.FromContext(ctx); ledger != nil {
@@ -531,7 +542,7 @@ func (r *runtime) agenticExecutor(cfg runConfig, registry *tool.Registry) exec.A
 			action = &copyAction
 		}
 		content := map[string]any{"text": result.Text, "evidence": result.Evidence, "actions": result.Actions}
-		return exec.AgenticResult{Content: content, Action: action, ToolCalls: result.ToolCalls, ModelCalls: result.ModelCalls, PromptTokens: result.Usage.PromptTokens, CompletionTokens: result.Usage.CompletionTokens, TotalTokens: result.Usage.TotalTokens, PendingArguments: result.PendingArguments, Continuation: result.Continuation}, err
+		return exec.AgenticResult{Composite: &tool.CompositeResult{Evidence: result.Evidence, Actions: result.Actions}, Content: content, Action: action, ToolCalls: result.ToolCalls, ModelCalls: result.ModelCalls, PromptTokens: result.Usage.PromptTokens, CompletionTokens: result.Usage.CompletionTokens, TotalTokens: result.Usage.TotalTokens, PendingArguments: result.PendingArguments, Continuation: result.Continuation}, err
 	}
 }
 
@@ -561,12 +572,36 @@ func (r *runtime) Resume(ctx context.Context, req ResumeRequest, options ...RunO
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if response != nil && runCfg.skills != nil {
+			calls, usage := runCfg.counter.snapshot()
+			response.Usage = usage
+			response.Stats.ModelCalls = calls
+			response.ToolCalls = runCfg.ledger.Snapshot().ToolCalls
+			response.Stats.ToolCalls = response.ToolCalls
+			response.Stats.PromptTokens = usage.PromptTokens
+			response.Stats.CompletionTokens = usage.CompletionTokens
+			response.Stats.TotalTokens = usage.TotalTokens
+		}
+	}()
 	value, err := r.cfg.checkpointStore.Load(ctx, req.Checkpoint)
 	if err != nil {
 		return nil, err
 	}
 	if err := value.Validate(); err != nil {
 		return nil, err
+	}
+	if len(value.SkillState) > 0 {
+		if runCfg.skills == nil {
+			return nil, checkpoint.ErrCatalogDrift
+		}
+		if err := runCfg.skills.restore(ctx, value.SkillState); err != nil {
+			return nil, err
+		}
+	}
+	ctx = withSkillScope(ctx, runCfg.skills)
+	if runCfg.skills != nil {
+		runCfg.skills.runID = value.RunID
 	}
 	if !value.Deadline.IsZero() {
 		var cancel context.CancelFunc
@@ -607,6 +642,9 @@ func (r *runtime) Resume(ctx context.Context, req ResumeRequest, options ...RunO
 			return nil, err
 		}
 		return &Response{RunID: value.RunID, Outcome: contract.OutcomeDegraded, Warnings: []contract.Warning{{Code: "CONFIRMATION_REJECTED", Message: "tool execution was rejected"}}, Actions: value.Actions}, nil
+	}
+	if runCfg.skills != nil && value.Pending != nil {
+		runCfg.skills.approve(value.Pending.ToolID, value.Pending.Arguments)
 	}
 	var envelope struct {
 		Kind string `json:"kind"`
@@ -649,12 +687,13 @@ func (r *runtime) Resume(ctx context.Context, req ResumeRequest, options ...RunO
 	return response, err
 }
 
-func (r *runtime) resumeSimple(ctx context.Context, runID string, state simpleResumeState, registry *tool.Registry, runModel model.Model) (*Response, error) {
+func (r *runtime) resumeSimple(ctx context.Context, runID string, state simpleResumeState, registry *tool.Registry, runModel model.Model) (response *Response, returnErr error) {
 	started := state.StartedAt
 	if started.IsZero() {
 		started = time.Now()
 	}
 	input, usage, evidence, actions := state.Input, state.Usage, state.Evidence, state.Actions
+	defer preserveRunFacts(ctx, runID, &response, &returnErr, &evidence, &actions, &usage)
 	modelCalls, toolCalls := state.ModelCalls, state.ToolCalls
 	successfulTools, failedTools := state.SuccessfulTools, state.FailedTools
 	remaining := state.Remaining
@@ -687,6 +726,11 @@ func (r *runtime) resumeSimple(ctx context.Context, runID string, state simpleRe
 				return &Response{RunID: runID, Checkpoint: id, Suspended: true, Outcome: contract.OutcomeSuspended, Warnings: []contract.Warning{{Code: "CONFIRMATION_REQUIRED", Message: "explicit confirmation is required before execution"}}, Stats: contract.RunStats{ModelCalls: modelCalls, ToolCalls: toolCalls, Duration: time.Since(started)}}, nil
 			}
 			result, err := tool.CallAndCollect(ctx, value, json.RawMessage(call.Function.Arguments), nil)
+			pendingComposite := tool.CollectComposite(result, &evidence, &actions)
+			if pendingComposite {
+				next := simpleResumeState{Request: state.Request, Input: input, Remaining: append([]model.ToolCallRequest(nil), remaining[index:]...), Usage: usage, Evidence: evidence, Actions: actions, ModelCalls: modelCalls, ToolCalls: toolCalls, SuccessfulTools: successfulTools, FailedTools: failedTools, StartedAt: started}
+				return r.suspendComposite(ctx, registry, runID, next, call, result)
+			}
 			if err != nil {
 				failedTools++
 				return &Response{RunID: runID, Usage: usage, Outcome: contract.OutcomeFailed, Evidence: evidence, Actions: actions, ToolCalls: toolCalls + 1, Stats: contract.RunStats{ModelCalls: modelCalls, ToolCalls: toolCalls + 1, SuccessfulTools: successfulTools, FailedTools: failedTools, PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens, TotalTokens: usage.TotalTokens, Duration: time.Since(started)}}, fmt.Errorf("tool %s: %w", call.Function.Name, err)
@@ -695,7 +739,7 @@ func (r *runtime) resumeSimple(ctx context.Context, runID string, state simpleRe
 			successfulTools++
 			now := time.Now().UTC()
 			evidence = append(evidence, Evidence{ToolID: call.Function.Name, ProviderID: value.Spec().ProviderID, Content: result.Content, Data: result.Content, CapturedAt: now, SchemaValid: true})
-			if result.Action != nil {
+			if result.Action != nil && result.Composite == nil {
 				actions = append(actions, *result.Action)
 			}
 			encoded, err := json.Marshal(result.Content)
@@ -739,7 +783,7 @@ func (r *runtime) resumeSimple(ctx context.Context, runID string, state simpleRe
 	return nil, errors.New("agent: tool call limit exceeded")
 }
 
-func (r *runtime) resumeComplex(ctx context.Context, checkpointValue *checkpoint.Checkpoint, state complexResumeState, registry *tool.Registry, runCfg runConfig) (*Response, error) {
+func (r *runtime) resumeComplex(ctx context.Context, checkpointValue *checkpoint.Checkpoint, state complexResumeState, registry *tool.Registry, runCfg runConfig) (response *Response, returnErr error) {
 	counter := runCfg.counter
 	if err := plan.ValidateAgainstTools(state.Plan, registry.ModelSpecs()); err != nil {
 		return nil, err
@@ -796,7 +840,7 @@ func (r *runtime) resumeComplex(ctx context.Context, checkpointValue *checkpoint
 		next := complexResumeState{Kind: "complex", Request: state.Request, Plan: state.Plan, Completed: persistStepResults(results, pending.StepID), Usage: usage, ModelCalls: modelCalls, Replans: state.Replans, StartedAt: state.StartedAt}
 		id, saveErr := r.saveComplexCheckpoint(ctx, registry, checkpointValue.RunID, next, pending)
 		if saveErr != nil {
-			return nil, saveErr
+			return complexCheckpointFailure(ctx, checkpointValue.RunID, results, usage), saveErr
 		}
 		return &Response{RunID: checkpointValue.RunID, Checkpoint: id, Suspended: true, Outcome: contract.OutcomeSuspended, Actions: []contract.ActionReceipt{*pending.Action}, Warnings: []contract.Warning{{Code: "CONFIRMATION_REQUIRED", Message: pending.Action.Message, StepID: pending.StepID}}}, nil
 	}
@@ -809,6 +853,7 @@ func (r *runtime) resumeComplex(ctx context.Context, checkpointValue *checkpoint
 	}
 	evidence := make([]Evidence, 0, len(results))
 	actions := make([]contract.ActionReceipt, 0)
+	defer preserveRunFacts(ctx, checkpointValue.RunID, &response, &returnErr, &evidence, &actions, &state.Usage)
 	warnings := make([]contract.Warning, 0)
 	outcome := contract.OutcomeSuccess
 	for _, result := range results {
@@ -826,6 +871,7 @@ func (r *runtime) resumeComplex(ctx context.Context, checkpointValue *checkpoint
 				outcome = contract.OutcomeDegraded
 			}
 		}
+		evidence = append(evidence, stepEvidence(result)...)
 		if result.Err != nil {
 			outcome = contract.OutcomeDegraded
 			warnings = append(warnings, contract.Warning{Code: "STEP_FAILED", Message: result.Err.Error(), StepID: result.StepID})
@@ -952,9 +998,13 @@ func (r *runtime) run(ctx context.Context, req Request, options ...RunOption) (r
 		}
 	}()
 	ctx = budget.WithLedger(ctx, runCfg.ledger)
+	ctx = withSkillScope(ctx, runCfg.skills)
 	runID, err := r.nextRunID()
 	if err != nil {
 		return nil, err
+	}
+	if runCfg.skills != nil {
+		runCfg.skills.runID = runID
 	}
 	r.observeBudget(ctx, runID)
 	if runCfg.observer != nil {
@@ -1020,6 +1070,7 @@ func (r *runtime) run(ctx context.Context, req Request, options ...RunOption) (r
 	var evidence []Evidence
 	var actions []contract.ActionReceipt
 	var usage model.Usage
+	defer preserveRunFacts(ctx, runID, &response, &returnErr, &evidence, &actions, &usage)
 	modelCalls, _ := runCfg.counter.snapshot()
 	toolCalls := 0
 	successfulTools, failedTools := 0, 0
@@ -1086,6 +1137,11 @@ func (r *runtime) run(ctx context.Context, req Request, options ...RunOption) (r
 				}
 			}
 			result, err := tool.CallAndCollect(ctx, t, json.RawMessage(call.Function.Arguments), nil)
+			pendingComposite := tool.CollectComposite(result, &evidence, &actions)
+			if pendingComposite {
+				state := simpleResumeState{Request: req, Input: input, Remaining: append([]model.ToolCallRequest(nil), out.ToolCalls[callIndex:]...), Usage: usage, Evidence: evidence, Actions: actions, ModelCalls: modelCalls, ToolCalls: toolCalls, SuccessfulTools: successfulTools, FailedTools: failedTools, StartedAt: started}
+				return r.suspendComposite(ctx, registry, runID, state, call, result)
+			}
 			toolCalls = runCfg.ledger.Snapshot().ToolCalls
 			if err != nil {
 				failedTools++
@@ -1095,7 +1151,7 @@ func (r *runtime) run(ctx context.Context, req Request, options ...RunOption) (r
 			successfulTools++
 			now := time.Now().UTC()
 			evidence = append(evidence, Evidence{ToolID: call.Function.Name, ProviderID: t.Spec().ProviderID, Data: result.Content, Content: result.Content, CapturedAt: now, SchemaValid: true})
-			if result.Action != nil {
+			if result.Action != nil && result.Composite == nil {
 				actions = append(actions, *result.Action)
 				r.emit(observe.Event{Type: "action.completed", RunID: runID, Data: map[string]any{"tool_id": result.Action.ToolID, "status": result.Action.Status}})
 			}
@@ -1112,6 +1168,10 @@ func (r *runtime) run(ctx context.Context, req Request, options ...RunOption) (r
 }
 
 func (r *runtime) runComplex(ctx context.Context, req Request, runID string, registry *tool.Registry, runCfg runConfig) (response *Response, returnErr error) {
+	if runCfg.skills != nil {
+		runCfg.skills.runID = runID
+		runCfg.skills.stream = false
+	}
 	ctx = context.WithValue(ctx, requestMessagesKey{}, r.requestMessages(req))
 	p := r.cfg.planner
 	if p == nil {
@@ -1263,7 +1323,7 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 				state := complexResumeState{Kind: "complex", Request: req, Plan: semantic, Completed: persistStepResults(results, pending.StepID), Usage: totalUsage, ModelCalls: modelCalls, Replans: replans, StartedAt: started}
 				id, saveErr := r.saveComplexCheckpoint(ctx, registry, runID, state, pending)
 				if saveErr != nil {
-					return nil, saveErr
+					return complexCheckpointFailure(ctx, runID, results, totalUsage), saveErr
 				}
 				resp.Checkpoint = id
 			}
@@ -1354,6 +1414,8 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 		r.emit(observe.Event{Type: "replan.completed", RunID: runID, PlanVersion: semantic.Version, Data: map[string]any{"version": semantic.Version, "replans": replans}, Details: map[string]any{"patch": patch, "plan": semantic}})
 	}
 	evidence := make([]Evidence, 0, len(results))
+	_, partialUsage := runCfg.counter.snapshot()
+	defer preserveRunFacts(ctx, runID, &response, &returnErr, &evidence, &actions, &partialUsage)
 	warnings := make([]contract.Warning, 0)
 	outcome := contract.OutcomeSuccess
 	if recovered {
@@ -1394,6 +1456,7 @@ func (r *runtime) runComplex(ctx context.Context, req Request, runID string, reg
 				warnings = append(warnings, contract.Warning{Code: code, Message: action.Message, StepID: result.StepID})
 			}
 		}
+		evidence = append(evidence, stepEvidence(result)...)
 		if result.Err != nil {
 			outcome = contract.OutcomeDegraded
 			warnings = append(warnings, contract.Warning{Code: "STEP_FAILED_OR_SKIPPED", Message: result.Err.Error(), StepID: result.StepID})
@@ -1508,10 +1571,34 @@ func stepActions(result exec.StepResult) []contract.ActionReceipt {
 			}
 		}
 	}
+	if result.Composite != nil {
+		return result.Composite.Actions
+	}
 	if result.Action != nil {
 		return []contract.ActionReceipt{*result.Action}
 	}
 	return nil
+}
+
+func stepEvidence(result exec.StepResult) []contract.Evidence {
+	if result.Composite == nil {
+		return nil
+	}
+	values := result.Composite.Evidence
+	if content, ok := result.Content.(map[string]any); ok {
+		if raw, ok := content["evidence"]; ok {
+			encoded, _ := json.Marshal(raw)
+			var full []contract.Evidence
+			if json.Unmarshal(encoded, &full) == nil {
+				values = full
+			}
+		}
+	}
+	out := append([]contract.Evidence(nil), values...)
+	for i := range out {
+		out[i].StepID = result.StepID
+	}
+	return out
 }
 
 func executionFacts(results []exec.StepResult) []map[string]any {
@@ -1705,6 +1792,10 @@ func (r *runtime) Stream(ctx context.Context, req Request, options ...RunOption)
 		return nil, err
 	}
 	runCtx = budget.WithLedger(runCtx, runCfg.ledger)
+	runCtx = withSkillScope(runCtx, runCfg.skills)
+	if runCfg.skills != nil {
+		runCfg.skills.stream = true
+	}
 	selected, err := r.selectMCPTools(runCtx, runCfg.model, req.Input)
 	if err != nil {
 		cancel()
@@ -1778,6 +1869,9 @@ func (r *runtime) Stream(ctx context.Context, req Request, options ...RunOption)
 	}
 	r.observeBudget(runCtx, runID)
 	onDone := func() { r.runObservers.Delete(runID); r.done() }
+	if runCfg.skills != nil {
+		runCfg.skills.runID = runID
+	}
 	owned = false
 	return &eventStream{stream: s, runtime: r, model: runCfg.model, registry: registry, input: streamInput, calls: make(map[int]model.ToolCallRequest), runID: runID, request: req, modelCalls: 1, started: time.Now(), pending: []Event{{Type: EventRunStarted, RunID: runID}, {Type: EventModelStarted, RunID: runID}}, ctx: runCtx, cancel: cancel, onDone: onDone}, nil
 }
@@ -1814,6 +1908,10 @@ type eventStream struct {
 
 func (s *eventStream) deliver(event Event) (Event, error) {
 	if event.Response != nil {
+		event.Response.Usage = skillUsage(s.ctx, event.Response.Usage)
+		event.Response.Stats.PromptTokens = event.Response.Usage.PromptTokens
+		event.Response.Stats.CompletionTokens = event.Response.Usage.CompletionTokens
+		event.Response.Stats.TotalTokens = event.Response.Usage.TotalTokens
 		if ledger := budget.FromContext(s.ctx); ledger != nil {
 			used := ledger.Snapshot()
 			event.Response.ToolCalls = used.ToolCalls
@@ -1976,6 +2074,20 @@ func (s *eventStream) finishToolCalls(ctx context.Context) (Event, error) {
 		result, err := tool.CallAndCollect(ctx, t, json.RawMessage(call.Function.Arguments), func(delta any) {
 			s.pending = append(s.pending, Event{Type: EventToolDelta, RunID: s.runID, ToolID: call.Function.Name, ToolDelta: delta})
 		})
+		if tool.CollectComposite(result, &s.evidence, &s.actions) {
+			state := simpleResumeState{Request: s.request, Input: s.input, Remaining: append([]model.ToolCallRequest(nil), ordered[callIndex:]...), Usage: s.usage, Evidence: s.evidence, Actions: s.actions, ModelCalls: s.modelCalls, ToolCalls: s.toolCalls, SuccessfulTools: s.successfulTools, FailedTools: s.failedTools, StartedAt: s.started}
+			response, saveErr := s.runtime.suspendComposite(ctx, s.registry, s.runID, state, call, result)
+			if saveErr != nil {
+				return Event{}, saveErr
+			}
+			s.finished = true
+			_ = s.stream.Close()
+			if s.cancel != nil {
+				s.cancel()
+			}
+			s.doneOnce.Do(s.onDone)
+			return s.deliver(Event{Type: EventRunSuspended, RunID: s.runID, Response: response})
+		}
 		if err != nil {
 			s.toolCalls++
 			s.failedTools++
@@ -1988,7 +2100,7 @@ func (s *eventStream) finishToolCalls(ctx context.Context) (Event, error) {
 		}
 		s.toolCalls++
 		s.successfulTools++
-		if result.Action != nil {
+		if result.Action != nil && result.Composite == nil {
 			s.actions = append(s.actions, *result.Action)
 		}
 		s.evidence = append(s.evidence, contract.Evidence{ToolID: call.Function.Name, ProviderID: t.Spec().ProviderID, Data: result.Content, Content: result.Content, CapturedAt: time.Now().UTC(), SchemaValid: true})

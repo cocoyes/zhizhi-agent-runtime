@@ -150,6 +150,9 @@ func (r Runner) Execute(ctx context.Context, candidates []tool.Tool, payload []b
 				return Result{ToolID: lastToolID, Value: value, Attempts: totalAttempts, Fallbacks: candidateIndex, AttemptsLog: records}, nil
 			}
 			lastErr = err
+			if candidate.Spec().SideEffect == tool.SideEffectDelegated {
+				return Result{ToolID: lastToolID, Value: value, Attempts: totalAttempts, Fallbacks: candidateIndex, AttemptsLog: records, ErrorKind: Permanent}, err
+			}
 			if value.Action != nil && (value.Action.Status == contract.ActionUnknown || value.Action.Status == contract.ActionSuccess || value.Action.Status == contract.ActionConfirmationRequired) {
 				return Result{ToolID: lastToolID, Value: value, Attempts: totalAttempts, Fallbacks: candidateIndex, AttemptsLog: records, ErrorKind: Ambiguous}, err
 			}
